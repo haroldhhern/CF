@@ -1,0 +1,68 @@
+export default {
+  async fetch(request) {
+    const ip = request.headers.get("CF-Connecting-IP") || "No CF-Connecting-IP header";
+
+    let ptr = null;
+
+    if (ip && ip !== "No CF-Connecting-IP header") {
+      const isIPv6 = ip.includes(":");
+      const queryName = isIPv6 ? ip6ToArpa(ip) : ip4ToArpa(ip);
+
+      const dnsResp = await fetch(
+        "https://cloudflare-dns.com/dns-query?name=" +
+          encodeURIComponent(queryName) +
+          "&type=PTR",
+        {
+          headers: { accept: "application/dns-json" },
+        }
+      );
+
+      if (dnsResp.ok) {
+        const dnsJson = await dnsResp.json();
+        if (dnsJson.Answer && dnsJson.Answer.length > 0) {
+          ptr = dnsJson.Answer[0].data.replace(/\.$/, "");
+        }
+      }
+    }
+
+    const data = {
+      ip,
+      ptr, // null if no PTR
+    };
+
+    return new Response(JSON.stringify(data, null, 2), {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+      },
+    });
+  }
+}
+
+function ip4ToArpa(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return ip;
+  return parts.reverse().join(".") + ".in-addr.arpa";
+}
+
+function ip6ToArpa(ip) {
+  const parts = ip.split("::");
+  if (parts.length > 2) return ip;
+
+  const head = parts[0] || "";
+  const tail = parts[1] || "";
+
+  const headGroups = head ? head.split(":") : [];
+  const tailGroups = tail ? tail.split(":") : [];
+
+  const missingGroups = 8 - (headGroups.length + tailGroups.length);
+  if (missingGroups < 0) return ip;
+
+  const zeros = Array(missingGroups).fill("0");
+  const allGroups = [...headGroups, ...zeros, ...tailGroups].map(g => g || "0");
+
+  const fullGroups = allGroups.map(g => g.padStart(4, "0").toLowerCase());
+  const hex = fullGroups.join("");
+  const nibbles = hex.split("").reverse().join(".");
+  return nibbles + ".ip6.arpa";
+}
