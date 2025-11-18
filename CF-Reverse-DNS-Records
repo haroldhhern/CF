@@ -1,68 +1,140 @@
+// KV binding in Cloudflare UI MUST be:
+// Variable name: SIAList_trusted_clients
+// Namespace: SIAList-trusted_clients
+
 export default {
-  async fetch(request) {
-    const ip = request.headers.get("CF-Connecting-IP") || "No CF-Connecting-IP header";
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const ip = request.headers.get("CF-Connecting-IP") || "";
 
     let ptr = null;
+    let trustedByIp = false;
+    let trustedByPtr = false;
+    let isTrusted = false;
+    let kvError = null;
 
-    if (ip && ip !== "No CF-Connecting-IP header") {
-      const isIPv6 = ip.includes(":");
-      const queryName = isIPv6 ? ip6ToArpa(ip) : ip4ToArpa(ip);
-
-      const dnsResp = await fetch(
-        "https://cloudflare-dns.com/dns-query?name=" +
-          encodeURIComponent(queryName) +
-          "&type=PTR",
-        {
-          headers: { accept: "application/dns-json" },
-        }
-      );
-
-      if (dnsResp.ok) {
-        const dnsJson = await dnsResp.json();
-        if (dnsJson.Answer && dnsJson.Answer.length > 0) {
-          ptr = dnsJson.Answer[0].data.replace(/\.$/, "");
-        }
-      }
+    try {
+      ptr = await getPtr(ip);
+      const trust = await getTrustFlags(env, ip, ptr);
+      trustedByIp = trust.trustedByIp;
+      trustedByPtr = trust.trustedByPtr;
+      isTrusted = trustedByIp || trustedByPtr;
+    } catch (e) {
+      kvError = String(e);
+      isTrusted = false;
     }
 
-    const data = {
-      ip,
-      ptr, // null if no PTR
-    };
+    // ---------------------------------------
+    // DEBUG MODE (COMMENTED OUT FOR PRODUCTION)
+    //
+    // if (url.searchParams.get("debug") === "1") {
+    //   return new Response(
+    //     JSON.stringify(
+    //       {
+    //         ip,
+    //         ptr,
+    //         trustedByIp,
+    //         trustedByPtr,
+    //         isTrusted,
+    //         kvBound: !!env.SIAList_trusted_clients,
+    //         kvError
+    //       },
+    //       null,
+    //       2
+    //     ),
+    //     {
+    //       status: kvError ? 500 : 200,
+    //       headers: { "content-type": "application/json" }
+    //     }
+    //   );
+    // }
+    // ---------------------------------------
 
-    return new Response(JSON.stringify(data, null, 2), {
-      status: 200,
-      headers: {
-        "content-type": "application/json",
-      },
+    // Fetch origin (Cloudflare Pages)
+    const originResponse = await fetch(request);
+
+    const headers = new Headers(originResponse.headers);
+
+    if (isTrusted) {
+      headers.set("SIAList", "approve");
+    }
+
+    return new Response(originResponse.body, {
+      status: originResponse.status,
+      statusText: originResponse.statusText,
+      headers
     });
   }
+};
+
+// ---------------- Trust Logic (IP OR PTR) ----------------
+
+async function getTrustFlags(env, ip, ptr) {
+  if (!env || !env.SIAList_trusted_clients) {
+    throw new Error("KV binding SIAList_trusted_clients is not configured");
+  }
+
+  let trustedByIp = false;
+  let trustedByPtr = false;
+
+  // IP check
+  if (ip) {
+    const v = await env.SIAList_trusted_clients.get(`ip:${ip}`);
+    if (v !== null) {
+      const norm = String(v).trim().toLowerCase();
+      trustedByIp = norm === "1" || norm === "true";
+    }
+  }
+
+  // PTR check
+  if (ptr) {
+    const v = await env.SIAList_trusted_clients.get(`ptr:${ptr}`);
+    if (v !== null) {
+      const norm = String(v).trim().toLowerCase();
+      trustedByPtr = norm === "1" || norm === "true";
+    }
+  }
+
+  return { trustedByIp, trustedByPtr };
+}
+
+// ---------------- PTR Lookup Helpers ----------------
+
+async function getPtr(ip) {
+  if (!ip) return null;
+
+  const isIPv6 = ip.includes(":");
+  const queryName = isIPv6 ? ip6ToArpa(ip) : ip4ToArpa(ip);
+
+  const resp = await fetch(
+    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(
+      queryName
+    )}&type=PTR`,
+    { headers: { accept: "application/dns-json" } }
+  );
+
+  if (!resp.ok) return null;
+  const json = await resp.json();
+  if (!json.Answer || json.Answer.length === 0) return null;
+
+  return json.Answer[0].data.replace(/\.$/, "");
 }
 
 function ip4ToArpa(ip) {
   const parts = ip.split(".");
-  if (parts.length !== 4) return ip;
-  return parts.reverse().join(".") + ".in-addr.arpa";
+  return parts.length === 4 ? parts.reverse().join(".") + ".in-addr.arpa" : ip;
 }
 
 function ip6ToArpa(ip) {
   const parts = ip.split("::");
   if (parts.length > 2) return ip;
 
-  const head = parts[0] || "";
-  const tail = parts[1] || "";
-
-  const headGroups = head ? head.split(":") : [];
-  const tailGroups = tail ? tail.split(":") : [];
-
-  const missingGroups = 8 - (headGroups.length + tailGroups.length);
-  if (missingGroups < 0) return ip;
-
-  const zeros = Array(missingGroups).fill("0");
-  const allGroups = [...headGroups, ...zeros, ...tailGroups].map(g => g || "0");
-
-  const fullGroups = allGroups.map(g => g.padStart(4, "0").toLowerCase());
-  const hex = fullGroups.join("");
-  const nibbles = hex.split("").reverse().join(".");
-  return nibbles + ".ip6.arpa";
+  const head = parts[0] ? parts[0].split(":") : [];
+  const tail = parts[1] ? parts[1].split(":") : [];
+  const missing = 8 - (head.length + tail.length);
+  const zeros = Array(missing).fill("0");
+  const full = [...head, ...zeros, ...tail]
+    .map((g) => g.padStart(4, "0"))
+    .join("");
+  return full.split("").reverse().join(".") + ".ip6.arpa";
 }
