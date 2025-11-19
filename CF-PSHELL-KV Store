@@ -1,12 +1,12 @@
 # Path to your bulk.json file
 $bulkFilePath = "C:\path\to\bulk.json"
 
-# Cloudflare info
-$accountId   = "<ACCOUNT_ID>"
-$namespaceId = "<NAMESPACE_ID>"
-$apiToken    = "<API_TOKEN>"
+# Cloudflare info (NO angle brackets, use real values)
+$accountId   = "YOUR_REAL_ACCOUNT_ID"
+$namespaceId = "YOUR_REAL_NAMESPACE_ID"
+$apiToken    = "YOUR_REAL_API_TOKEN"
 
-# Read JSON body
+# Read JSON body exactly as-is
 $body = Get-Content -Raw -Path $bulkFilePath
 
 # API endpoint for KV bulk put
@@ -20,8 +20,16 @@ $headers = @{
 
 Write-Host "Uploading bulk KV data to namespace $namespaceId ..." -ForegroundColor Cyan
 
-$response = Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -Body $body
-
-Write-Host "Success:" $response.success
-Write-Host "Errors:"  ($response.errors   | ConvertTo-Json -Depth 5)
-Write-Host "Messages:" ($response.messages | ConvertTo-Json -Depth 5)
+try {
+    $response = Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -Body $body
+    Write-Host "Success:" $response.success
+    Write-Host "Errors:"  ($response.errors   | ConvertTo-Json -Depth 5)
+    Write-Host "Messages:" ($response.messages | ConvertTo-Json -Depth 5)
+}
+catch {
+    Write-Host "Request failed with status code:" $_.Exception.Response.StatusCode.value__ -ForegroundColor Red
+    $errorBody = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+    $errorText = $errorBody.ReadToEnd()
+    Write-Host "Response body from Cloudflare:" -ForegroundColor Yellow
+    Write-Host $errorText
+}
