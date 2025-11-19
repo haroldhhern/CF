@@ -1,9 +1,5 @@
-// KV binding in Cloudflare UI MUST be:
-// Variable name: SIAList_trusted_clients
-// Namespace: SIAList-trusted_clients
-
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const ip = request.headers.get("CF-Connecting-IP") || "";
 
     let ptr = null;
@@ -18,90 +14,76 @@ export default {
       trustedByPtr = trust.trustedByPtr;
       isTrusted = trustedByIp || trustedByPtr;
     } catch (e) {
-      // Fail-safe: never break the origin
       isTrusted = false;
     }
 
-    // ----------------------------------------------
-    // DEBUG MODE (COMMENTED OUT — SAFE IN PRODUCTION)
-    //
-    // const url = new URL(request.url);
-    // if (url.searchParams.get("debug") === "1") {
-    //   return new Response(
-    //     JSON.stringify(
-    //       {
-    //         ip,
-    //         ptr,
-    //         trustedByIp,
-    //         trustedByPtr,
-    //         isTrusted,
-    //         kvBound: !!env.SIAList_trusted_clients
-    //       },
-    //       null,
-    //       2
-    //     ),
-    //     {
-    //       status: 200,
-    //       headers: { "content-type": "application/json" }
-    //     }
-    //   );
-    // }
-    //
-    // ----------------------------------------------
+    const siaValue = isTrusted ? "approve" : "deny";
 
-    // Normal request to origin (Cloudflare Pages)
-    const originResponse = await fetch(request);
-    const headers = new Headers(originResponse.headers);
-
-    if (isTrusted) {
-      headers.set("SIAList", "approve");
+    if (!isTrusted) {
+      return new Response("403 Forbidden", {
+        status: 403,
+        headers: { "content-type": "text/plain" }
+      });
     }
 
-    return new Response(originResponse.body, {
-      status: originResponse.status,
-      statusText: originResponse.statusText,
-      headers
+    const originRequestHeaders = new Headers(request.headers);
+    originRequestHeaders.set("SIAList", siaValue);
+
+    const originRequest = new Request(request, {
+      headers: originRequestHeaders
     });
+
+    return fetch(originRequest);
   }
 };
 
-// --------- KV Trust Logic (IP OR PTR) ---------
-
 async function getTrustFlags(env, ip, ptr) {
-  const result = { trustedByIp: false, trustedByPtr: false };
+  const out = { trustedByIp: false, trustedByPtr: false };
+  const kv = env.SIAList_trusted_clients;
+  if (!kv) return out;
 
-  if (!env || !env.SIAList_trusted_clients) {
-    return result;
-  }
-
-  // IP
+  // IP exact match
   if (ip) {
-    const v = await env.SIAList_trusted_clients.get(`ip:${ip}`);
+    const v = await kv.get(`ip:${ip}`);
     if (v !== null) {
       const norm = v.trim().toLowerCase();
-      result.trustedByIp = norm === "1" || norm === "true";
+      out.trustedByIp = norm === "1" || norm === "true";
     }
   }
 
-  // PTR
+  // PTR exact + wildcard suffix match
   if (ptr) {
-    const v = await env.SIAList_trusted_clients.get(`ptr:${ptr}`);
-    if (v !== null) {
-      const norm = v.trim().toLowerCase();
-      result.trustedByPtr = norm === "1" || norm === "true";
+    const vFull = await kv.get(`ptr:${ptr}`);
+    if (vFull !== null) {
+      const norm = vFull.trim().toLowerCase();
+      out.trustedByPtr = norm === "1" || norm === "true";
+    }
+
+    if (!out.trustedByPtr) {
+      const parts = ptr.split(".");
+      for (let i = 1; i < parts.length - 1; i++) {
+        const suffix = parts.slice(i).join(".");
+        const key = `ptr:.${suffix}`;
+
+        const vSuffix = await kv.get(key);
+        if (vSuffix !== null) {
+          const norm = vSuffix.trim().toLowerCase();
+          if (norm === "1" || norm === "true") {
+            out.trustedByPtr = true;
+            break;
+          }
+        }
+      }
     }
   }
 
-  return result;
+  return out;
 }
-
-// --------- PTR Helpers ---------
 
 async function getPtr(ip) {
   if (!ip) return null;
 
-  const isIPv6 = ip.includes(":");
-  const queryName = isIPv6 ? ip6ToArpa(ip) : ip4ToArpa(ip);
+  const queryName = ip.includes(":") ? ip6ToArpa(ip) : ip4ToArpa(ip);
 
   const resp = await fetch(
     `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(
@@ -119,7 +101,9 @@ async function getPtr(ip) {
 
 function ip4ToArpa(ip) {
   const parts = ip.split(".");
-  return parts.length === 4 ? parts.reverse().join(".") + ".in-addr.arpa" : ip;
+  return parts.length === 4
+    ? parts.reverse().join(".") + ".in-addr.arpa"
+    : ip;
 }
 
 function ip6ToArpa(ip) {
@@ -130,8 +114,9 @@ function ip6ToArpa(ip) {
   const tail = parts[1] ? parts[1].split(":") : [];
   const missing = 8 - (head.length + tail.length);
   const zeros = Array(missing).fill("0");
+
   const full = [...head, ...zeros, ...tail]
-    .map((g) => g.padStart(4, "0"))
+    .map(h => h.padStart(4, "0"))
     .join("");
 
   return full.split("").reverse().join(".") + ".ip6.arpa";
