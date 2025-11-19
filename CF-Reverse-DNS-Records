@@ -4,14 +4,12 @@
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
     const ip = request.headers.get("CF-Connecting-IP") || "";
 
     let ptr = null;
     let trustedByIp = false;
     let trustedByPtr = false;
     let isTrusted = false;
-    let kvError = null;
 
     try {
       ptr = await getPtr(ip);
@@ -20,13 +18,14 @@ export default {
       trustedByPtr = trust.trustedByPtr;
       isTrusted = trustedByIp || trustedByPtr;
     } catch (e) {
-      kvError = String(e);
+      // Fail-safe: never break the origin
       isTrusted = false;
     }
 
-    // ---------------------------------------
-    // DEBUG MODE (COMMENTED OUT FOR PRODUCTION)
+    // ----------------------------------------------
+    // DEBUG MODE (COMMENTED OUT — SAFE IN PRODUCTION)
     //
+    // const url = new URL(request.url);
     // if (url.searchParams.get("debug") === "1") {
     //   return new Response(
     //     JSON.stringify(
@@ -36,23 +35,22 @@ export default {
     //         trustedByIp,
     //         trustedByPtr,
     //         isTrusted,
-    //         kvBound: !!env.SIAList_trusted_clients,
-    //         kvError
+    //         kvBound: !!env.SIAList_trusted_clients
     //       },
     //       null,
     //       2
     //     ),
     //     {
-    //       status: kvError ? 500 : 200,
+    //       status: 200,
     //       headers: { "content-type": "application/json" }
     //     }
     //   );
     // }
-    // ---------------------------------------
+    //
+    // ----------------------------------------------
 
-    // Fetch origin (Cloudflare Pages)
+    // Normal request to origin (Cloudflare Pages)
     const originResponse = await fetch(request);
-
     const headers = new Headers(originResponse.headers);
 
     if (isTrusted) {
@@ -67,38 +65,37 @@ export default {
   }
 };
 
-// ---------------- Trust Logic (IP OR PTR) ----------------
+// --------- KV Trust Logic (IP OR PTR) ---------
 
 async function getTrustFlags(env, ip, ptr) {
+  const result = { trustedByIp: false, trustedByPtr: false };
+
   if (!env || !env.SIAList_trusted_clients) {
-    throw new Error("KV binding SIAList_trusted_clients is not configured");
+    return result;
   }
 
-  let trustedByIp = false;
-  let trustedByPtr = false;
-
-  // IP check
+  // IP
   if (ip) {
     const v = await env.SIAList_trusted_clients.get(`ip:${ip}`);
     if (v !== null) {
-      const norm = String(v).trim().toLowerCase();
-      trustedByIp = norm === "1" || norm === "true";
+      const norm = v.trim().toLowerCase();
+      result.trustedByIp = norm === "1" || norm === "true";
     }
   }
 
-  // PTR check
+  // PTR
   if (ptr) {
     const v = await env.SIAList_trusted_clients.get(`ptr:${ptr}`);
     if (v !== null) {
-      const norm = String(v).trim().toLowerCase();
-      trustedByPtr = norm === "1" || norm === "true";
+      const norm = v.trim().toLowerCase();
+      result.trustedByPtr = norm === "1" || norm === "true";
     }
   }
 
-  return { trustedByIp, trustedByPtr };
+  return result;
 }
 
-// ---------------- PTR Lookup Helpers ----------------
+// --------- PTR Helpers ---------
 
 async function getPtr(ip) {
   if (!ip) return null;
@@ -136,5 +133,6 @@ function ip6ToArpa(ip) {
   const full = [...head, ...zeros, ...tail]
     .map((g) => g.padStart(4, "0"))
     .join("");
+
   return full.split("").reverse().join(".") + ".ip6.arpa";
 }
