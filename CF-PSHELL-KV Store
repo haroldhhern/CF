@@ -1,108 +1,35 @@
-// KV binding in Cloudflare UI MUST be:
-// Variable name: SIAList_trusted_clients
-// Namespace: SIAList-trusted_clients
+# Path to your bulk.json file
+$bulkFilePath = "C:\path\to\bulk.json"
 
-export default {
-  async fetch(request, env, ctx) {
-    const ip = request.headers.get("CF-Connecting-IP") || "";
+# Cloudflare info (all REAL values, no angle brackets)
+$accountId   = "YOUR_REAL_ACCOUNT_ID"         # looks like a UUID
+$namespaceId = "YOUR_REAL_NAMESPACE_ID"       # the KV namespace ID, NOT the name
+$apiToken    = "YOUR_REAL_API_TOKEN"
 
-    let isTrusted = false;
+# Read JSON body
+$body = Get-Content -Raw -Path $bulkFilePath
 
-    try {
-      const ptr = await getPtr(ip);
-      const trust = await getTrustFlags(env, ip, ptr);
-      isTrusted = trust.trustedByIp || trust.trustedByPtr;
-    } catch (e) {
-      // Fail safe: if KV or PTR lookup fails, just don't trust, but DO NOT break the page
-      isTrusted = false;
-    }
+# API endpoint for KV bulk put
+$uri = "https://api.cloudflare.com/client/v4/accounts/$accountId/storage/kv/namespaces/$namespaceId/bulk"
 
-    // Always proxy the original request as-is to the origin (Cloudflare Pages)
-    const originResponse = await fetch(request);
-
-    // Copy origin headers and add SIAList only if trusted
-    const headers = new Headers(originResponse.headers);
-
-    if (isTrusted) {
-      headers.set("SIAList", "approve");
-    }
-
-    return new Response(originResponse.body, {
-      status: originResponse.status,
-      statusText: originResponse.statusText,
-      headers
-    });
-  }
-};
-
-// ---------------- Trust Logic (IP OR PTR via KV) ----------------
-
-async function getTrustFlags(env, ip, ptr) {
-  const result = { trustedByIp: false, trustedByPtr: false };
-
-  // If KV binding isn't configured, just treat as not trusted
-  if (!env || !env.SIAList_trusted_clients) {
-    return result;
-  }
-
-  // IP check
-  if (ip) {
-    const v = await env.SIAList_trusted_clients.get(`ip:${ip}`);
-    if (v !== null) {
-      const norm = String(v).trim().toLowerCase();
-      result.trustedByIp = norm === "1" || norm === "true";
-    }
-  }
-
-  // PTR check
-  if (ptr) {
-    const v = await env.SIAList_trusted_clients.get(`ptr:${ptr}`);
-    if (v !== null) {
-      const norm = String(v).trim().toLowerCase();
-      result.trustedByPtr = norm === "1" || norm === "true";
-    }
-  }
-
-  return result;
+# Headers
+$headers = @{
+    "Authorization" = "Bearer $apiToken"
+    "Content-Type"  = "application/json"
 }
 
-// ---------------- PTR Helpers ----------------
+Write-Host "Uploading bulk KV data to namespace $namespaceId ..." -ForegroundColor Cyan
 
-async function getPtr(ip) {
-  if (!ip) return null;
-
-  const isIPv6 = ip.includes(":");
-  const queryName = isIPv6 ? ip6ToArpa(ip) : ip4ToArpa(ip);
-
-  const resp = await fetch(
-    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(
-      queryName
-    )}&type=PTR`,
-    { headers: { accept: "application/dns-json" } }
-  );
-
-  if (!resp.ok) return null;
-  const json = await resp.json();
-  if (!json.Answer || json.Answer.length === 0) return null;
-
-  return json.Answer[0].data.replace(/\.$/, "");
+try {
+    $response = Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -Body $body
+    Write-Host "Success:" $response.success
+    Write-Host "Errors:"  ($response.errors   | ConvertTo-Json -Depth 5)
+    Write-Host "Messages:" ($response.messages | ConvertTo-Json -Depth 5)
 }
-
-function ip4ToArpa(ip) {
-  const parts = ip.split(".");
-  return parts.length === 4 ? parts.reverse().join(".") + ".in-addr.arpa" : ip;
-}
-
-function ip6ToArpa(ip) {
-  const parts = ip.split("::");
-  if (parts.length > 2) return ip;
-
-  const head = parts[0] ? parts[0].split(":") : [];
-  const tail = parts[1] ? parts[1].split(":") : [];
-  const missing = 8 - (head.length + tail.length);
-  const zeros = Array(missing).fill("0");
-  const full = [...head, ...zeros, ...tail]
-    .map((g) => g.padStart(4, "0"))
-    .join("");
-  return full.split("").reverse().join(".") + ".ip6.arpa";
+catch {
+    Write-Host "Request failed with status code:" $_.Exception.Response.StatusCode.value__ -ForegroundColor Red
+    $errorBody = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+    $errorText = $errorBody.ReadToEnd()
+    Write-Host "Response body from Cloudflare:" -ForegroundColor Yellow
+    Write-Host $errorText
 }
