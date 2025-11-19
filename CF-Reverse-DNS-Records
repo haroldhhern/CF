@@ -1,11 +1,19 @@
+// Toggle this to true only when you need to debug. E.g. Then go to https://mytravel-dev.elguardia.net/some/path?sia_debug=1
+// If isTrusted is false, that same debug call still returns 403 (so access control is never bypassed by debug
+// Set DEBUG_MODE = false once you’re done.
+
+const DEBUG_MODE = false;
+
 export default {
   async fetch(request, env) {
     const ip = request.headers.get("CF-Connecting-IP") || "";
+    const url = new URL(request.url);
 
     let ptr = null;
     let trustedByIp = false;
     let trustedByPtr = false;
     let isTrusted = false;
+    let kvBound = false;
 
     try {
       ptr = await getPtr(ip);
@@ -13,12 +21,38 @@ export default {
       trustedByIp = trust.trustedByIp;
       trustedByPtr = trust.trustedByPtr;
       isTrusted = trustedByIp || trustedByPtr;
+      kvBound = trust.kvBound;
     } catch (e) {
       isTrusted = false;
     }
 
     const siaValue = isTrusted ? "approve" : "deny";
 
+    // ---------- PRODUCTION DEBUG WRAPPER ----------
+    // Only active if DEBUG_MODE = true and the caller explicitly asks for it:
+    //   https://yourdomain/path?sia_debug=1
+    if (DEBUG_MODE && url.searchParams.get("sia_debug") === "1") {
+      const debugBody = {
+        ip,
+        ptr,
+        trustedByIp,
+        trustedByPtr,
+        isTrusted,
+        siaValue,
+        kvBound
+      };
+
+      // Still enforce access control: if not trusted, return 403 with debug info.
+      const status = isTrusted ? 200 : 403;
+
+      return new Response(JSON.stringify(debugBody, null, 2), {
+        status,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    // ---------- END DEBUG WRAPPER ----------
+
+    // If NOT trusted: block at the edge, no SIAList to browser.
     if (!isTrusted) {
       return new Response("403 Forbidden", {
         status: 403,
@@ -26,8 +60,9 @@ export default {
       });
     }
 
+    // If trusted: forward to origin, tagging REQUEST with SIAList for logging.
     const originRequestHeaders = new Headers(request.headers);
-    originRequestHeaders.set("SIAList", siaValue);
+    originRequestHeaders.set("SIAList", siaValue); // "approve"
 
     const originRequest = new Request(request, {
       headers: originRequestHeaders
@@ -38,11 +73,13 @@ export default {
 };
 
 async function getTrustFlags(env, ip, ptr) {
-  const out = { trustedByIp: false, trustedByPtr: false };
+  const out = { trustedByIp: false, trustedByPtr: false, kvBound: false };
+
   const kv = env.SIAList_trusted_clients;
   if (!kv) return out;
+  out.kvBound = true;
 
-  // IP exact match
+  // IP exact match: ip:<address>
   if (ip) {
     const v = await kv.get(`ip:${ip}`);
     if (v !== null) {
@@ -51,20 +88,21 @@ async function getTrustFlags(env, ip, ptr) {
     }
   }
 
-  // PTR exact + wildcard suffix match
+  // PTR exact + leading-dot wildcard suffix: ptr:<full> and ptr:.<suffix>
   if (ptr) {
+    // Exact PTR host
     const vFull = await kv.get(`ptr:${ptr}`);
     if (vFull !== null) {
       const norm = vFull.trim().toLowerCase();
       out.trustedByPtr = norm === "1" || norm === "true";
     }
 
+    // Wildcard suffix: ptr:.<suffix>
     if (!out.trustedByPtr) {
       const parts = ptr.split(".");
       for (let i = 1; i < parts.length - 1; i++) {
         const suffix = parts.slice(i).join(".");
         const key = `ptr:.${suffix}`;
-
         const vSuffix = await kv.get(key);
         if (vSuffix !== null) {
           const norm = vSuffix.trim().toLowerCase();
