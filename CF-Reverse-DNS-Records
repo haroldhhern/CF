@@ -1,7 +1,4 @@
-// Toggle this to true only when you need to debug. E.g. Then go to https://mytravel-dev.elguardia.net/some/path?sia_debug=1
-// If isTrusted is false, that same debug call still returns 403 (so access control is never bypassed by debug
-// Set DEBUG_MODE = false once you’re done.
-
+// Toggle this to true only when you want to debug.
 const DEBUG_MODE = false;
 
 export default {
@@ -14,14 +11,18 @@ export default {
     let trustedByPtr = false;
     let isTrusted = false;
     let kvBound = false;
+    let matchedKey = null;
+    let matchedValue = null;
 
     try {
       ptr = await getPtr(ip);
       const trust = await getTrustFlags(env, ip, ptr);
       trustedByIp = trust.trustedByIp;
       trustedByPtr = trust.trustedByPtr;
-      isTrusted = trustedByIp || trustedByPtr;
       kvBound = trust.kvBound;
+      matchedKey = trust.matchedKey;
+      matchedValue = trust.matchedValue;
+      isTrusted = trustedByIp || trustedByPtr;
     } catch (e) {
       isTrusted = false;
     }
@@ -29,8 +30,7 @@ export default {
     const siaValue = isTrusted ? "approve" : "deny";
 
     // ---------- PRODUCTION DEBUG WRAPPER ----------
-    // Only active if DEBUG_MODE = true and the caller explicitly asks for it:
-    //   https://yourdomain/path?sia_debug=1
+    // Only active when DEBUG_MODE = true AND ?sia_debug=1 is present.
     if (DEBUG_MODE && url.searchParams.get("sia_debug") === "1") {
       const debugBody = {
         ip,
@@ -39,10 +39,11 @@ export default {
         trustedByPtr,
         isTrusted,
         siaValue,
-        kvBound
+        kvBound,
+        matchedKey,
+        matchedValue
       };
 
-      // Still enforce access control: if not trusted, return 403 with debug info.
       const status = isTrusted ? 200 : 403;
 
       return new Response(JSON.stringify(debugBody, null, 2), {
@@ -73,43 +74,61 @@ export default {
 };
 
 async function getTrustFlags(env, ip, ptr) {
-  const out = { trustedByIp: false, trustedByPtr: false, kvBound: false };
+  const out = {
+    trustedByIp: false,
+    trustedByPtr: false,
+    kvBound: false,
+    matchedKey: null,
+    matchedValue: null
+  };
 
   const kv = env.SIAList_trusted_clients;
   if (!kv) return out;
   out.kvBound = true;
 
-  // IP exact match: ip:<address>
+  // ----- IP exact match: ip:<address> -----
   if (ip) {
-    const v = await kv.get(`ip:${ip}`);
-    if (v !== null) {
-      const norm = v.trim().toLowerCase();
-      out.trustedByIp = norm === "1" || norm === "true";
+    const ipKey = `ip:${ip}`;
+    const vIp = await kv.get(ipKey);
+    if (vIp !== null) {
+      const norm = vIp.trim().toLowerCase();
+      if (norm === "1" || norm === "true") {
+        out.trustedByIp = true;
+        out.matchedKey = ipKey;
+        out.matchedValue = vIp;
+        return out; // IP match wins; no need to keep checking
+      }
     }
   }
 
-  // PTR exact + leading-dot wildcard suffix: ptr:<full> and ptr:.<suffix>
+  // ----- PTR: exact + leading-dot suffix: ptr:<full>, ptr:.<suffix> -----
   if (ptr) {
-    // Exact PTR host
-    const vFull = await kv.get(`ptr:${ptr}`);
+    // 1) Exact PTR hostname
+    let ptrKey = `ptr:${ptr}`;
+    let vFull = await kv.get(ptrKey);
     if (vFull !== null) {
       const norm = vFull.trim().toLowerCase();
-      out.trustedByPtr = norm === "1" || norm === "true";
+      if (norm === "1" || norm === "true") {
+        out.trustedByPtr = true;
+        out.matchedKey = ptrKey;
+        out.matchedValue = vFull;
+        return out;
+      }
     }
 
-    // Wildcard suffix: ptr:.<suffix>
-    if (!out.trustedByPtr) {
-      const parts = ptr.split(".");
-      for (let i = 1; i < parts.length - 1; i++) {
-        const suffix = parts.slice(i).join(".");
-        const key = `ptr:.${suffix}`;
-        const vSuffix = await kv.get(key);
-        if (vSuffix !== null) {
-          const norm = vSuffix.trim().toLowerCase();
-          if (norm === "1" || norm === "true") {
-            out.trustedByPtr = true;
-            break;
-          }
+    // 2) Suffix wildcards: ptr:.<suffix>
+    const parts = ptr.split(".");
+    for (let i = 1; i < parts.length - 1; i++) {
+      const suffix = parts.slice(i).join(".");
+      ptrKey = `ptr:.${suffix}`;
+      const vSuffix = await kv.get(ptrKey);
+      if (vSuffix !== null) {
+        const norm = vSuffix.trim().toLowerCase();
+        if (norm === "1" || norm === "true") {
+          out.trustedByPtr = true;
+          out.matchedKey = ptrKey;
+          out.matchedValue = vSuffix;
+          return out;
         }
       }
     }
