@@ -1,9 +1,81 @@
-// Toggle this to true only when you want to debug.
-const DEBUG_MODE = false;
+/*
+================================================================================
+ DEBUG MODE INSTRUCTIONS- Do not turn on without Drew's or Dev's approval
+================================================================================
+
+To debug, do the following:
+
+1. Temporarily set:
+       const DEBUG_MODE = true;
+
+2. Visit ANY hostname + ANY URI + ?sia_debug=1
+
+   Examples:
+       https://mytravel-dev.elguardia.net/?sia_debug=1
+
+
+3. The Worker will return JSON showing:
+       - ip          (normalized IP used for matching)
+       - ipRaw       (exact CF-Connecting-IP, lowercased)
+       - ptr
+       - trustedByIp
+       - trustedByPtr
+       - isTrusted
+       - siaValue
+       - kvBound
+       - matchedKey      (KV key that caused trust)
+       - matchedValue    (Value returned from KV)
+
+4. When finished debugging:
+       Set DEBUG_MODE = false
+
+================================================================================
+ END
+================================================================================
+
+IP / CIDR (same "ip:" prefix for both IPv4 and IPv6):
+
+- Exact IPv4:
+    key   = "ip:107.130.27.151"
+    value = "1"   (trusted) or "0" (not trusted)
+
+- IPv4 CIDR:
+    key   = "ip:204.250.2.0/15"
+    value = "1"   (trusted) or "0" (not trusted)
+
+- Exact IPv6:
+    key   = "ip:2600:387:15:2017::1"
+    value = "1"   (trusted) or "0"
+
+- IPv6 CIDR:
+    key   = "ip:2600:387:15:2017::/64"
+    key   = "ip:2600:387:15:2017::1/128"
+    value = "1"   (trusted) or "0"
+
+The Worker:
+- First tries exact IP keys (normalized + raw IPv6 forms).
+- Then scans all "ip:" keys that contain "/":
+    - If CIDR IP is IPv4 → IPv4 CIDR match
+    - If CIDR IP is IPv6 → IPv6 CIDR match
+
+PTR:
+
+- Exact hostname:
+    key   = "ptr:full.ptr.hostname.example"
+    value = "1"
+
+- Wildcard suffix:
+    key   = "ptr:.lightspeed.irvnca.sbcglobal.net"
+    value = "1"
+*/
+
+const DEBUG_MODE = true; // Enable debugging ONLY when needed
 
 export default {
   async fetch(request, env) {
-    const ip = request.headers.get("CF-Connecting-IP") || "";
+    const ipHeader = request.headers.get("CF-Connecting-IP") || "";
+    const ipRaw = ipHeader.toLowerCase(); // exact form from header, lowercased
+    const ip = ipRaw.includes(":") ? normalizeIPv6(ipRaw) : ipRaw; // normalized v6, raw v4
     const url = new URL(request.url);
 
     let ptr = null;
@@ -15,8 +87,8 @@ export default {
     let matchedValue = null;
 
     try {
-      ptr = await getPtr(ip);
-      const trust = await getTrustFlags(env, ip, ptr);
+      ptr = await getPtr(ipRaw); // PTR lookup uses raw IP, v4 or v6
+      const trust = await getTrustFlags(env, ip, ipRaw, ptr);
       trustedByIp = trust.trustedByIp;
       trustedByPtr = trust.trustedByPtr;
       kvBound = trust.kvBound;
@@ -29,11 +101,11 @@ export default {
 
     const siaValue = isTrusted ? "approve" : "deny";
 
-    // ---------- PRODUCTION DEBUG WRAPPER ----------
-    // Only active when DEBUG_MODE = true AND ?sia_debug=1 is present.
+    // ---------- DEBUG WRAPPER ----------
     if (DEBUG_MODE && url.searchParams.get("sia_debug") === "1") {
       const debugBody = {
         ip,
+        ipRaw,
         ptr,
         trustedByIp,
         trustedByPtr,
@@ -44,26 +116,16 @@ export default {
         matchedValue
       };
 
-      const status = isTrusted ? 200 : 403;
-
       return new Response(JSON.stringify(debugBody, null, 2), {
-        status,
+        status: isTrusted ? 200 : 403,
         headers: { "content-type": "application/json" }
       });
     }
     // ---------- END DEBUG WRAPPER ----------
 
-    // If NOT trusted: block at the edge, no SIAList to browser.
-    if (!isTrusted) {
-      return new Response("403 Forbidden", {
-        status: 403,
-        headers: { "content-type": "text/plain" }
-      });
-    }
-
-    // If trusted: forward to origin, tagging REQUEST with SIAList for logging.
+    // Always forward to origin. Backend enforces based on SIAList.
     const originRequestHeaders = new Headers(request.headers);
-    originRequestHeaders.set("SIAList", siaValue); // "approve"
+    originRequestHeaders.set("SIAList", siaValue);
 
     const originRequest = new Request(request, {
       headers: originRequestHeaders
@@ -73,7 +135,7 @@ export default {
   }
 };
 
-async function getTrustFlags(env, ip, ptr) {
+async function getTrustFlags(env, ip, ipRaw, ptr) {
   const out = {
     trustedByIp: false,
     trustedByPtr: false,
@@ -86,22 +148,78 @@ async function getTrustFlags(env, ip, ptr) {
   if (!kv) return out;
   out.kvBound = true;
 
-  // ----- IP exact match: ip:<address> -----
+  // ----- IP: exact + CIDR (IPv4 + IPv6) -----
   if (ip) {
-    const ipKey = `ip:${ip}`;
-    const vIp = await kv.get(ipKey);
-    if (vIp !== null) {
-      const norm = vIp.trim().toLowerCase();
-      if (norm === "1" || norm === "true") {
-        out.trustedByIp = true;
-        out.matchedKey = ipKey;
-        out.matchedValue = vIp;
-        return out; // IP match wins; no need to keep checking
+    // 1) Exact IP matches:
+    //    For IPv4: ip === ipRaw
+    //    For IPv6: ip is normalized; ipRaw is header form
+    const candidates = [];
+    candidates.push(`ip:${ip}`);
+    if (ipRaw !== ip) {
+      candidates.push(`ip:${ipRaw}`);
+    }
+
+    for (const key of candidates) {
+      const vIp = await kv.get(key);
+      if (vIp !== null) {
+        const normVal = vIp.trim().toLowerCase();
+        if (normVal === "1" || normVal === "true") {
+          out.trustedByIp = true;
+          out.matchedKey = key;
+          out.matchedValue = vIp;
+          return out;
+        }
       }
     }
+
+    // 2) CIDR matches: list all ip:<cidr> keys
+    let cursor;
+    do {
+      const listResp = await kv.list({ prefix: "ip:", cursor });
+      for (const entry of listResp.keys) {
+        const key = entry.name;      // e.g. "ip:204.250.2.0/15" or "ip:2600:387:15:2017::/64"
+        const raw = key.slice(3);    // strip "ip:"
+
+        if (!raw.includes("/")) continue; // skip non-CIDR
+
+        const [cidrIp, prefixStr] = raw.split("/");
+        const prefix = parseInt(prefixStr, 10);
+        if (Number.isNaN(prefix)) continue;
+
+        const isCidrV6 = cidrIp.includes(":");
+        const isClientV6 = ip.includes(":");
+
+        // only compare v4<->v4 or v6<->v6
+        if (isCidrV6 !== isClientV6) continue;
+
+        let inRange = false;
+        if (isCidrV6) {
+          // IPv6 CIDR
+          inRange = ipv6InCidr(ip, cidrIp, prefix);
+        } else {
+          // IPv4 CIDR
+          inRange = ip4InCidr(ip, cidrIp, prefix);
+        }
+
+        if (!inRange) continue;
+
+        const vCidr = await kv.get(key);
+        if (vCidr !== null) {
+          const normVal = vCidr.trim().toLowerCase();
+          if (normVal === "1" || normVal === "true") {
+            out.trustedByIp = true;
+            out.matchedKey = key;
+            out.matchedValue = vCidr;
+            return out;
+          }
+        }
+      }
+
+      cursor = listResp.list_complete ? undefined : listResp.cursor;
+    } while (cursor);
   }
 
-  // ----- PTR: exact + leading-dot suffix: ptr:<full>, ptr:.<suffix> -----
+  // ----- PTR: exact + leading-dot suffix -----
   if (ptr) {
     // 1) Exact PTR hostname
     let ptrKey = `ptr:${ptr}`;
@@ -164,17 +282,93 @@ function ip4ToArpa(ip) {
 }
 
 function ip6ToArpa(ip) {
-  const parts = ip.split("::");
-  if (parts.length > 2) return ip;
-
-  const head = parts[0] ? parts[0].split(":") : [];
-  const tail = parts[1] ? parts[1].split(":") : [];
-  const missing = 8 - (head.length + tail.length);
-  const zeros = Array(missing).fill("0");
-
-  const full = [...head, ...zeros, ...tail]
-    .map(h => h.padStart(4, "0"))
-    .join("");
-
-  return full.split("").reverse().join(".") + ".ip6.arpa";
+  const full = normalizeIPv6(ip);
+  const hex = full.replace(/:/g, ""); // 32 hex chars
+  return hex.split("").reverse().join(".") + ".ip6.arpa";
 }
+
+// ----- IPv6 normalization & CIDR helpers -----
+
+// Normalize IPv6 to 8 groups of 4 hex digits, lowercase.
+// e.g. "2600:387:15:2017::1" -> "2600:0387:0015:2017:0000:0000:0000:0001"
+function normalizeIPv6(ip) {
+  const addr = ip.toLowerCase();
+
+  if (!addr.includes("::")) {
+    const parts = addr.split(":");
+    if (parts.length !== 8) return addr;
+    return parts.map(h => h.padStart(4, "0")).join(":");
+  }
+
+  const [headStr, tailStr] = addr.split("::");
+  const head = headStr ? headStr.split(":") : [];
+  const tail = tailStr ? tailStr.split(":") : [];
+
+  const missing = 8 - (head.length + tail.length);
+  if (missing < 0) return addr;
+
+  const zeros = Array(missing).fill("0");
+  const full = [...head, ...zeros, ...tail];
+
+  if (full.length !== 8) return addr;
+
+  return full.map(h => h.padStart(4, "0")).join(":");
+}
+
+// Convert normalized IPv6 to BigInt
+function ipv6ToBigInt(ip) {
+  const full = normalizeIPv6(ip);
+  const hex = full.replace(/:/g, ""); // 32 hex chars
+  try {
+    return BigInt("0x" + hex);
+  } catch {
+    return null;
+  }
+}
+
+function ipv6InCidr(ip, cidrIp, prefix) {
+  if (prefix < 0 || prefix > 128) return false;
+
+  const ipInt = ipv6ToBigInt(ip);
+  const cidrInt = ipv6ToBigInt(cidrIp);
+  if (ipInt === null || cidrInt === null) return false;
+
+  const totalBits = 128n;
+  const p = BigInt(prefix);
+  const hostBits = totalBits - p;
+  const mask =
+    p === 0n
+      ? 0n
+      : ((~((1n << hostBits) - 1n)) & ((1n << totalBits) - 1n));
+
+  return (ipInt & mask) === (cidrInt & mask);
+}
+
+// ----- IPv4 CIDR helpers -----
+
+function ip4InCidr(ip, cidrIp, prefix) {
+  if (prefix < 0 || prefix > 32) return false;
+
+  const ipInt = ipv4ToInt(ip);
+  const cidrInt = ipv4ToInt(cidrIp);
+  if (ipInt === null || cidrInt === null) return false;
+
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+
+  return (ipInt & mask) === (cidrInt & mask);
+}
+
+function ipv4ToInt(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  const nums = parts.map(p => parseInt(p, 10));
+  if (nums.some(n => Number.isNaN(n) || n < 0 || n > 255)) return null;
+
+  return (
+    ((nums[0] << 24) >>> 0) +
+    ((nums[1] << 16) >>> 0) +
+    ((nums[2] << 8) >>> 0) +
+    (nums[3] >>> 0)
+  );
+}
+//Signed by HHH
