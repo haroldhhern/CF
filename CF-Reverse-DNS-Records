@@ -8,10 +8,10 @@ To debug, do the following:
 1. Temporarily set:
        const DEBUG_MODE = true;
 
-2. Visit ANY hostname + ANY URI + ?sia_debug=1
+2. Visit ANY hostname + ANY URI + ?myheadername_debug=1
 
    Examples:
-       https://mytravel-dev.elguardia.net/?sia_debug=1
+       https://hostname/?myheadername_debug=1
 
 
 3. The Worker will return JSON showing:
@@ -21,7 +21,7 @@ To debug, do the following:
        - trustedByIp
        - trustedByPtr
        - isTrusted
-       - siaValue
+       - myheadernameValue
        - kvBound
        - matchedKey      (KV key that caused trust)
        - matchedValue    (Value returned from KV)
@@ -99,10 +99,10 @@ export default {
       isTrusted = false;
     }
 
-    const siaValue = isTrusted ? "approve" : "deny";
+    const myheadernameValue = isTrusted ? "approve" : "deny";
 
     // ---------- DEBUG WRAPPER ----------
-    if (DEBUG_MODE && url.searchParams.get("sia_debug") === "1") {
+    if (DEBUG_MODE && url.searchParams.get("myheadername_debug") === "1") {
       const debugBody = {
         ip,
         ipRaw,
@@ -110,7 +110,7 @@ export default {
         trustedByIp,
         trustedByPtr,
         isTrusted,
-        siaValue,
+        myheadernameValue,
         kvBound,
         matchedKey,
         matchedValue
@@ -123,9 +123,9 @@ export default {
     }
     // ---------- END DEBUG WRAPPER ----------
 
-    // Always forward to origin. Backend enforces based on SIAList.
+    // Always forward to origin. Backend enforces based on MydeaderName.
     const originRequestHeaders = new Headers(request.headers);
-    originRequestHeaders.set("SIAList", siaValue);
+    originRequestHeaders.set("MydeaderName", myheadernameValue);
 
     const originRequest = new Request(request, {
       headers: originRequestHeaders
@@ -144,7 +144,7 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
     matchedValue: null
   };
 
-  const kv = env.SIAList_trusted_clients;
+  const kv = env.MydeaderName_trusted_clients;
   if (!kv) return out;
   out.kvBound = true;
 
