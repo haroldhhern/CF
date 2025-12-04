@@ -1,0 +1,26 @@
+{
+  "cookies": [
+    "cookie",
+    "_ga",
+    "_gid",
+    "cf_clearance",
+    "_cf_bm",
+    "_cfuvid",
+    "_cfseq"
+  ],
+  "request_headers": [
+    "cf-mitigated",
+    "cdn-loop",
+    "content-type",
+    "cf-ray",
+    "cf-connecting-ip",
+    "cache-control",
+    "cf-cache-status",
+    "set-cookie"
+  ],
+  "response_headers": [
+    // add any response headers you want here, e.g.:
+    // "server",
+    // "content-length"
+  ]
+}
