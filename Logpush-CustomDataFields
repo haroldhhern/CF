@@ -1,12 +1,14 @@
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$ZoneId,
+# ============================
+# HARD-CODED VARIABLES
+# ============================
 
-    [Parameter(Mandatory = $true)]
-    [string]$ApiToken,
+$ZoneId     = "YOUR_ZONE_ID_HERE"
+$ApiToken  = "YOUR_API_TOKEN_HERE"
+$ConfigPath = ".\cf-logpush-custom-fields.json"
 
-    [string]$ConfigPath = ".\cf-logpush-custom-fields.json"
-)
+# ============================
+# DO NOT EDIT BELOW
+# ============================
 
 $baseUrl = "https://api.cloudflare.com/client/v4/zones/$ZoneId"
 $headers = @{
@@ -14,65 +16,65 @@ $headers = @{
     "Content-Type" = "application/json"
 }
 
-# --- Read config file (cookies, request_headers, response_headers) ---
-$config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-
-$requestHeaders  = @($config.request_headers)
-$responseHeaders = @($config.response_headers)
-$cookies         = @($config.cookies)
+# Read config file (PowerShell 5.1 compatible)
+$config = (Get-Content $ConfigPath) -join "`n" | ConvertFrom-Json
 
 $actionParameters = @{}
 
-if ($requestHeaders.Count -gt 0) {
-    $actionParameters.request_fields = $requestHeaders |
+if ($config.request_headers.Count -gt 0) {
+    $actionParameters.request_fields = $config.request_headers |
         ForEach-Object { @{ name = $_.ToLower() } }
 }
-if ($responseHeaders.Count -gt 0) {
-    $actionParameters.response_fields = $responseHeaders |
+
+if ($config.response_headers.Count -gt 0) {
+    $actionParameters.response_fields = $config.response_headers |
         ForEach-Object { @{ name = $_.ToLower() } }
 }
-if ($cookies.Count -gt 0) {
-    $actionParameters.cookie_fields = $cookies |
+
+if ($config.cookies.Count -gt 0) {
+    $actionParameters.cookie_fields = $config.cookies |
         ForEach-Object { @{ name = $_ } }
 }
 
-if ($actionParameters.Keys.Count -eq 0) {
-    throw "No fields defined in $ConfigPath."
+if ($actionParameters.Count -eq 0) {
+    throw "No custom fields defined in $ConfigPath"
 }
 
-# --- Get or create http_log_custom_fields ruleset ---
+# Get existing ruleset
 $rulesets = Invoke-RestMethod -Method GET -Uri "$baseUrl/rulesets" -Headers $headers
-
 $ruleset = $rulesets.result |
     Where-Object { $_.kind -eq "zone" -and $_.phase -eq "http_log_custom_fields" } |
     Select-Object -First 1
 
+# Create ruleset if missing
 if (-not $ruleset) {
-    $body = @{
+    $createBody = @{
         name        = "Zone-level phase entry point"
         kind        = "zone"
-        description = "Custom log fields for Logpush"
         phase       = "http_log_custom_fields"
+        description = "Logpush Custom Fields"
     } | ConvertTo-Json
 
-    $ruleset = (Invoke-RestMethod -Method POST -Uri "$baseUrl/rulesets" -Headers $headers -Body $body).result
+    $ruleset = (Invoke-RestMethod -Method POST -Uri "$baseUrl/rulesets" -Headers $headers -Body $createBody).result
 }
 
-$rulesetId = $ruleset.id
-
-# --- Update ruleset with a single log_custom_field rule ---
-$updateBody = @{
+# Update ruleset
+$body = @{
     rules = @(
         @{
             action            = "log_custom_field"
             expression        = "true"
-            description       = "Set Logpush custom fields"
             enabled           = $true
+            description       = "Set Logpush custom fields"
             action_parameters = $actionParameters
         }
     )
 } | ConvertTo-Json -Depth 10
 
-$resp = Invoke-RestMethod -Method PUT -Uri "$baseUrl/rulesets/$rulesetId" -Headers $headers -Body $updateBody
+$result = Invoke-RestMethod -Method PUT `
+    -Uri "$baseUrl/rulesets/$($ruleset.id)" `
+    -Headers $headers `
+    -Body $body
 
-$resp.result.rules[0].action_parameters | ConvertTo-Json -Depth 10
+Write-Host "✅ Logpush custom fields updated"
+$result.result.rules[0].action_parameters | ConvertTo-Json -Depth 10
