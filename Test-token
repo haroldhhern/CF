@@ -1,13 +1,19 @@
-$ZoneId  = "YOUR_REAL_ZONE_ID"
-$headers = @{ Authorization = "Bearer $ApiToken" }
+$ApiToken = "YOUR_API_TOKEN_HERE"
 
-Invoke-RestMethod -Method GET `
-  -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId" `
-  -Headers $headers
+$Headers = @{ "Authorization" = "Bearer $ApiToken" }
 
+$zonesResponse = Invoke-RestMethod `
+  -Uri "https://api.cloudflare.com/client/v4/zones" `
+  -Headers $Headers `
+  -Method GET
 
+if (-not $zonesResponse.success) {
+    Write-Host "Request failed:"
+    $zonesResponse.errors | ForEach-Object {
+        Write-Host "  Code   : $($_.code)"
+        Write-Host "  Msg    : $($_.message)"
+    }
+    return
+}
 
-
-
-$baseUrl = "https://api.cloudflare.com/client/v4/zones/$ZoneId"
-Invoke-RestMethod -Method GET -Uri "$baseUrl/rulesets" -Headers $headers
+$zonesResponse.result | Select-Object name, id
