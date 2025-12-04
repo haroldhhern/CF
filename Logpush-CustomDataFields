@@ -1,0 +1,78 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$ZoneId,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ApiToken,
+
+    [string]$ConfigPath = ".\cf-logpush-custom-fields.json"
+)
+
+$baseUrl = "https://api.cloudflare.com/client/v4/zones/$ZoneId"
+$headers = @{
+    Authorization = "Bearer $ApiToken"
+    "Content-Type" = "application/json"
+}
+
+# --- Read config file (cookies, request_headers, response_headers) ---
+$config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+
+$requestHeaders  = @($config.request_headers)
+$responseHeaders = @($config.response_headers)
+$cookies         = @($config.cookies)
+
+$actionParameters = @{}
+
+if ($requestHeaders.Count -gt 0) {
+    $actionParameters.request_fields = $requestHeaders |
+        ForEach-Object { @{ name = $_.ToLower() } }
+}
+if ($responseHeaders.Count -gt 0) {
+    $actionParameters.response_fields = $responseHeaders |
+        ForEach-Object { @{ name = $_.ToLower() } }
+}
+if ($cookies.Count -gt 0) {
+    $actionParameters.cookie_fields = $cookies |
+        ForEach-Object { @{ name = $_ } }
+}
+
+if ($actionParameters.Keys.Count -eq 0) {
+    throw "No fields defined in $ConfigPath."
+}
+
+# --- Get or create http_log_custom_fields ruleset ---
+$rulesets = Invoke-RestMethod -Method GET -Uri "$baseUrl/rulesets" -Headers $headers
+
+$ruleset = $rulesets.result |
+    Where-Object { $_.kind -eq "zone" -and $_.phase -eq "http_log_custom_fields" } |
+    Select-Object -First 1
+
+if (-not $ruleset) {
+    $body = @{
+        name        = "Zone-level phase entry point"
+        kind        = "zone"
+        description = "Custom log fields for Logpush"
+        phase       = "http_log_custom_fields"
+    } | ConvertTo-Json
+
+    $ruleset = (Invoke-RestMethod -Method POST -Uri "$baseUrl/rulesets" -Headers $headers -Body $body).result
+}
+
+$rulesetId = $ruleset.id
+
+# --- Update ruleset with a single log_custom_field rule ---
+$updateBody = @{
+    rules = @(
+        @{
+            action            = "log_custom_field"
+            expression        = "true"
+            description       = "Set Logpush custom fields"
+            enabled           = $true
+            action_parameters = $actionParameters
+        }
+    )
+} | ConvertTo-Json -Depth 10
+
+$resp = Invoke-RestMethod -Method PUT -Uri "$baseUrl/rulesets/$rulesetId" -Headers $headers -Body $updateBody
+
+$resp.result.rules[0].action_parameters | ConvertTo-Json -Depth 10
