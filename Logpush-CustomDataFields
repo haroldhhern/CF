@@ -17,10 +17,6 @@ $headers = @{
 }
 
 # Read config file (PowerShell 5.1 compatible)
-if (-not (Test-Path $ConfigPath)) {
-    throw "Config file not found: $ConfigPath"
-}
-
 $config = (Get-Content $ConfigPath) -join "`n" | ConvertFrom-Json
 
 $actionParameters = @{}
@@ -44,10 +40,6 @@ if ($actionParameters.Count -eq 0) {
     throw "No custom fields defined in $ConfigPath"
 }
 
-Write-Host "==> Request headers : $($config.request_headers -join ', ')"
-Write-Host "==> Response headers: $($config.response_headers -join ', ')"
-Write-Host "==> Cookies         : $($config.cookies -join ', ')"
-
 # Get existing ruleset for http_log_custom_fields
 $rulesets = Invoke-RestMethod -Method GET -Uri "$baseUrl/rulesets" -Headers $headers
 
@@ -57,8 +49,6 @@ $ruleset = $rulesets.result |
 
 # Create ruleset if missing
 if (-not $ruleset) {
-    Write-Host "==> No http_log_custom_fields ruleset found. Creating one..."
-
     $createBody = @{
         name        = "Zone-level phase entry point"
         kind        = "zone"
@@ -70,9 +60,7 @@ if (-not $ruleset) {
     $ruleset = $createResult.result
 }
 
-# IMPORTANT: use a separate variable (fixes the 'variable reference is not valid' issue)
 $rulesetId = $ruleset.id
-Write-Host "==> Using ruleset ID: $rulesetId"
 
 # Build ruleset update payload
 $body = @{
@@ -87,14 +75,10 @@ $body = @{
     )
 } | ConvertTo-Json -Depth 10
 
-# Update ruleset – note the use of $rulesetId (no property access inside the string)
+# Update ruleset
 $result = Invoke-RestMethod -Method PUT `
     -Uri "$baseUrl/rulesets/$rulesetId" `
     -Headers $headers `
     -Body $body
 
 Write-Host "✅ Logpush custom fields updated"
-
-if ($result.result -and $result.result.rules -and $result.result.rules.Count -gt 0) {
-    $result.result.rules[0].action_parameters | ConvertTo-Json -Depth 10
-}
