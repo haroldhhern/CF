@@ -3,7 +3,7 @@
 # ============================
 
 $ZoneId     = "YOUR_ZONE_ID_HERE"
-$ApiToken  = "YOUR_API_TOKEN_HERE"
+$ApiToken   = "YOUR_API_TOKEN_HERE"
 $ConfigPath = ".\cf-logpush-custom-fields.json"
 
 # ============================
@@ -16,22 +16,29 @@ $headers = @{
     "Content-Type" = "application/json"
 }
 
+Write-Host "==> Using Zone ID: $ZoneId"
+Write-Host "==> Config file : $ConfigPath"
+
 # Read config file (PowerShell 5.1 compatible)
+if (-not (Test-Path $ConfigPath)) {
+    throw "Config file not found: $ConfigPath"
+}
+
 $config = (Get-Content $ConfigPath) -join "`n" | ConvertFrom-Json
 
 $actionParameters = @{}
 
-if ($config.request_headers.Count -gt 0) {
+if ($config.request_headers -and $config.request_headers.Count -gt 0) {
     $actionParameters.request_fields = $config.request_headers |
         ForEach-Object { @{ name = $_.ToLower() } }
 }
 
-if ($config.response_headers.Count -gt 0) {
+if ($config.response_headers -and $config.response_headers.Count -gt 0) {
     $actionParameters.response_fields = $config.response_headers |
         ForEach-Object { @{ name = $_.ToLower() } }
 }
 
-if ($config.cookies.Count -gt 0) {
+if ($config.cookies -and $config.cookies.Count -gt 0) {
     $actionParameters.cookie_fields = $config.cookies |
         ForEach-Object { @{ name = $_ } }
 }
@@ -40,14 +47,38 @@ if ($actionParameters.Count -eq 0) {
     throw "No custom fields defined in $ConfigPath"
 }
 
+Write-Host "==> Request headers : $($config.request_headers -join ', ')" 
+Write-Host "==> Response headers: $($config.response_headers -join ', ')" 
+Write-Host "==> Cookies         : $($config.cookies -join ', ')" 
+
 # Get existing ruleset
-$rulesets = Invoke-RestMethod -Method GET -Uri "$baseUrl/rulesets" -Headers $headers
+Write-Host "==> Fetching existing rulesets..." 
+try {
+    $rulesets = Invoke-RestMethod -Method GET -Uri "$baseUrl/rulesets" -Headers $headers
+} catch {
+    Write-Host "❌ Error calling GET /rulesets:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    if ($_.Exception.Response -and $_.Exception.Response.GetResponseStream()) {
+        $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+        $body   = $reader.ReadToEnd()
+        Write-Host "Response body:" -ForegroundColor Red
+        Write-Host $body
+    }
+    throw
+}
+
+if (-not $rulesets -or -not $rulesets.result) {
+    throw "Did not receive a valid rulesets result from Cloudflare. Check token permissions and Zone ID."
+}
+
 $ruleset = $rulesets.result |
     Where-Object { $_.kind -eq "zone" -and $_.phase -eq "http_log_custom_fields" } |
     Select-Object -First 1
 
 # Create ruleset if missing
 if (-not $ruleset) {
+    Write-Host "==> No http_log_custom_fields ruleset found. Creating one..."
+
     $createBody = @{
         name        = "Zone-level phase entry point"
         kind        = "zone"
@@ -55,8 +86,29 @@ if (-not $ruleset) {
         description = "Logpush Custom Fields"
     } | ConvertTo-Json
 
-    $ruleset = (Invoke-RestMethod -Method POST -Uri "$baseUrl/rulesets" -Headers $headers -Body $createBody).result
+    try {
+        $createResult = Invoke-RestMethod -Method POST -Uri "$baseUrl/rulesets" -Headers $headers -Body $createBody
+    } catch {
+        Write-Host "❌ Error calling POST /rulesets:" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
+        if ($_.Exception.Response -and $_.Exception.Response.GetResponseStream()) {
+            $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+            $body   = $reader.ReadToEnd()
+            Write-Host "Response body:" -ForegroundColor Red
+            Write-Host $body
+        }
+        throw
+    }
+
+    if (-not $createResult -or -not $createResult.result) {
+        throw "Failed to create ruleset. Check permissions."
+    }
+
+    $ruleset = $createResult.result
 }
+
+$rulesetId = $ruleset.id
+Write-Host "==> Using ruleset ID: $rulesetId"
 
 # Update ruleset
 $body = @{
@@ -71,10 +123,32 @@ $body = @{
     )
 } | ConvertTo-Json -Depth 10
 
-$result = Invoke-RestMethod -Method PUT `
-    -Uri "$baseUrl/rulesets/$($ruleset.id)" `
-    -Headers $headers `
-    -Body $body
+Write-Host "==> Updating ruleset..."
+try {
+    $result = Invoke-RestMethod -Method PUT `
+        -Uri "$baseUrl/rulesets/$rulesetId" `
+        -Headers $headers `
+        -Body $body
+} catch {
+    Write-Host "❌ Error calling PUT /rulesets/$rulesetId:" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    if ($_.Exception.Response -and $_.Exception.Response.GetResponseStream()) {
+        $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+        $bodyErr = $reader.ReadToEnd()
+        Write-Host "Response body:" -ForegroundColor Red
+        Write-Host $bodyErr
+    }
+    throw
+}
 
-Write-Host "✅ Logpush custom fields updated"
-$result.result.rules[0].action_parameters | ConvertTo-Json -Depth 10
+if (-not $result -or -not $result.result) {
+    throw "Cloudflare did not return a valid result when updating ruleset. Check for errors above."
+}
+
+Write-Host "✅ Logpush custom fields updated" -ForegroundColor Green
+
+if ($result.result.rules -and $result.result.rules.Count -gt 0) {
+    $result.result.rules[0].action_parameters | ConvertTo-Json -Depth 10
+} else {
+    Write-Host "⚠️ Ruleset updated, but no rules returned in response." -ForegroundColor Yellow
+}
