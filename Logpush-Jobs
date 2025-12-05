@@ -1,0 +1,53 @@
+$apiToken = "YOUR_CLOUDFLARE_API_TOKEN"
+$zoneId   = "YOUR_ZONE_ID"
+
+# Splunk HEC destination (example)
+$destinationConf = "splunk://splunk.example.com:8088?token=YOUR_SPLUNK_HEC_TOKEN&index=cloudflare&insecure-skip-verify=false"
+
+# Enable full logging
+$logpullOptions = "fields=*&timestamps=rfc3339"
+
+# Datasets to create jobs for
+$datasets = @(
+    @{ name = "All HTTP Requests";  dataset = "http_requests"  },
+    @{ name = "All Firewall Events"; dataset = "firewall_events" }
+)
+
+$uriBase = "https://api.cloudflare.com/client/v4/zones/$zoneId/logpush/jobs"
+
+$headers = @{
+    "Authorization" = "Bearer $apiToken"
+    "Content-Type"  = "application/json"
+}
+
+foreach ($job in $datasets) {
+
+    $body = @{
+        name             = $job.name
+        dataset          = $job.dataset
+        enabled          = $true
+        destination_conf = $destinationConf
+        logpull_options  = $logpullOptions
+    } | ConvertTo-Json -Depth 5
+
+    Write-Host "Creating Logpush job for $($job.dataset)..."
+
+    try {
+        $response = Invoke-RestMethod -Method Post -Uri $uriBase -Headers $headers -Body $body
+
+        if ($response.success) {
+            Write-Host "✅ Created job:"
+            Write-Host "   ID: $($response.result.id)"
+            Write-Host "   Dataset: $($response.result.dataset)"
+        } else {
+            Write-Host "❌ Failed:"
+            $response.errors | ForEach-Object { Write-Host $_.message }
+        }
+    }
+    catch {
+        Write-Host "❌ API error:"
+        Write-Host $_.Exception.Message
+    }
+
+    Write-Host ""
+}
