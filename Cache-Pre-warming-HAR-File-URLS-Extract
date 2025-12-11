@@ -5,6 +5,10 @@
       - If assets.txt exists, script asks if you want to reuse it.
       - If you reuse it → skips extraction and begins pre-warming.
       - If not → extracts URLs again from HAR, overwrites assets.txt, then pre-warms.
+
+    Note:
+      - On Windows PowerShell 5.x, -UseBasicParsing avoids IE/cookie prompts.
+      - On PowerShell 7+, remove -UseBasicParsing (it’s not needed and will error).
 #>
 
 # -------------------------
@@ -22,11 +26,70 @@ $StaticExtensions = @(
 )
 
 # Optional: Exclude hosts (leave empty for fully host-agnostic)
-$ExcludedHosts = @()
+$ExcludedHosts = @(
+    # "fonts.googleapis.com",
+    # "www.googletagmanager.com"
+)
 
 # -------------------------
-# CHECK FOR EXISTING URL LIST
+# FUNCTION: Extract URLs from HAR
 # -------------------------
+function Get-StaticUrlsFromHar {
+    param(
+        [string]$HarFilePath,
+        [string[]]$StaticExts,
+        [string[]]$ExcludedHosts
+    )
+
+    Write-Host "Loading HAR file: $HarFilePath"
+
+    if (!(Test-Path $HarFilePath)) {
+        throw "HAR file not found at path: $HarFilePath"
+    }
+
+    try {
+        $harJson = Get-Content $HarFilePath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw "Failed to parse HAR JSON: $($_.Exception.Message)"
+    }
+
+    if (-not $harJson.log.entries) {
+        throw "No entries found in HAR. Is this a valid HAR export?"
+    }
+
+    Write-Host "Extracting static asset URLs..."
+
+    $urls = $harJson.log.entries |
+        Where-Object { $_.request.method -eq "GET" } |
+        ForEach-Object {
+            try { [Uri]$_.request.url } catch { $null }
+        } |
+        Where-Object { $_ -ne $null } |
+        Where-Object {
+            if ($ExcludedHosts.Count -eq 0) { $true }
+            else { -not ($ExcludedHosts -contains $_.Host) }
+        } |
+        Where-Object {
+            $ext = [System.IO.Path]::GetExtension($_.AbsolutePath).ToLower()
+            $StaticExts -contains $ext
+        } |
+        ForEach-Object {
+            # Keep full URL, including query string
+            $_.AbsoluteUri
+        } |
+        Sort-Object -Unique
+
+    Write-Host "Found $($urls.Count) static asset URLs."
+
+    return $urls
+}
+
+# -------------------------
+# MAIN LOGIC
+# -------------------------
+$urls = @()
+
 if (Test-Path $OutputFile) {
     Write-Host "URL list '$OutputFile' already exists."
     $choice = Read-Host "Do you want to reuse this list? (Y/N)"
@@ -34,91 +97,43 @@ if (Test-Path $OutputFile) {
     if ($choice -match '^[Yy]') {
         Write-Host "Reusing existing URL list."
         $urls = Get-Content $OutputFile
-        goto PREWARM
     }
     else {
         Write-Host "Re-extracting URLs from HAR..."
+        try {
+            $urls = Get-StaticUrlsFromHar -HarFilePath $HarPath -StaticExts $StaticExtensions -ExcludedHosts $ExcludedHosts
+        }
+        catch {
+            Write-Host "ERROR: $($_.Exception.Message)"
+            return
+        }
+
+        if ($urls.Count -eq 0) {
+            Write-Host "No static URLs found — nothing to warm."
+            return
+        }
+
+        $urls | Set-Content -Encoding UTF8 $OutputFile
+        Write-Host "Saved new URL list to $OutputFile"
     }
 }
-
-# -------------------------
-# LOAD HAR + EXTRACT ASSET URLS
-# -------------------------
-Write-Host "Loading HAR file: $HarPath"
-
-if (!(Test-Path $HarPath)) {
-    Write-Host "ERROR: HAR file not found at path: $HarPath"
-    return
-}
-
-try {
-    $harJson = Get-Content $HarPath -Raw | ConvertFrom-Json
-}
-catch {
-    Write-Host "ERROR: Failed to parse HAR JSON: $($_.Exception.Message)"
-    return
-}
-
-if (-not $harJson.log.entries) {
-    Write-Host "ERROR: No entries found in HAR. Is this a valid HAR export?"
-    return
-}
-
-Write-Host "Extracting static asset URLs..."
-
-$urls = $harJson.log.entries |
-    Where-Object { $_.request.method -eq "GET" } |
-    ForEach-Object {
-        try { [Uri]$_.request.url } catch { $null }
-    } |
-    Where-Object { $_ -ne $null } |
-    Where-Object {
-        if ($ExcludedHosts.Count -eq 0) { $true }
-        else { -not ($ExcludedHosts -contains $_.Host) }
-    } |
-    Where-Object {
-        $ext = [System.IO.Path]::GetExtension($_.AbsolutePath).ToLower()
-        $StaticExtensions -contains $ext
-    } |
-    ForEach-Object {
-        # Keep full URL, including query string
-        $_.AbsoluteUri
-    } |
-    Sort-Object -Unique
-
-Write-Host "Found $($urls.Count) static asset URLs."
-
-if ($urls.Count -eq 0) {
-    Write-Host "No static URLs found — nothing to warm."
-    return
-}
-
-# Write new list
-$urls | Set-Content -Encoding UTF8 $OutputFile
-Write-Host "Saved new URL list to $OutputFile"
-
-# -------------------------
-# PRE-WARM LABEL (jump here if reusing assets.txt)
-# -------------------------
-:PREWARM
-
-$urls = Get-Content $OutputFile
-Write-Host "Starting pre-warm on $($urls.Count) static assets..."
-
-$Headers = @{
-    "User-Agent" = $UserAgent
-    "Accept"     = "*/*"
-}
-
-foreach ($Url in $urls) {
-    Write-Host "Warming: $Url"
+else {
+    Write-Host "No existing URL list found. Extracting from HAR..."
     try {
-        $response = Invoke-WebRequest -Uri $Url -Headers $Headers -Method GET -UseBasicParsing -TimeoutSec 30
-        Write-Host "  Status: $($response.StatusCode)"
+        $urls = Get-StaticUrlsFromHar -HarFilePath $HarPath -StaticExts $StaticExtensions -ExcludedHosts $ExcludedHosts
     }
     catch {
-        Write-Host "  Error warming $Url : $($_.Exception.Message)"
+        Write-Host "ERROR: $($_.Exception.Message)"
+        return
     }
+
+    if ($urls.Count -eq 0) {
+        Write-Host "No static URLs found — nothing to warm."
+        return
+    }
+
+    $urls | Set-Content -Encoding UTF8 $OutputFile
+    Write-Host "Saved new URL list to $OutputFile"
 }
 
-Write-Host "Pre-warm finished."
+# ---------------
