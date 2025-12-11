@@ -1,0 +1,15 @@
+$AssetList = "assets.txt"
+$Headers   = @{ "User-Agent" = "Cache-Prewarm-Bot" }
+
+$Urls = Get-Content $AssetList
+
+foreach ($Url in $Urls) {
+    try {
+        Write-Host "Warming cache for: $Url"
+        $response = Invoke-WebRequest -Uri $Url -Headers $Headers -Method GET
+        Write-Host "  Status: $($response.StatusCode)"
+    }
+    catch {
+        Write-Host "  Error warming $Url : $($_.Exception.Message)"
+    }
+}
