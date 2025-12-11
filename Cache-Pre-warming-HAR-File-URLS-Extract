@@ -1,39 +1,81 @@
-# --- CONFIG ---
-$HarPath    = "capture.har"          # Path to your HAR file
-$Domain     = "example.com"          # Your site hostname (no https)
-$OutputFile = "assets.txt"           # Where to write the asset URLs
+# -------------------------
+# CONFIG
+# -------------------------
+$HarPath     = "capture.har"      # Path to your HAR file
+$OutputFile  = "assets.txt"       # File to store extracted static URLs
+$UserAgent   = "Cache-Prewarm-Bot"
 
-# Static file extensions to treat as pre-warm candidates
+# Static file extensions to treat as pre-warm candidates (host-agnostic)
 $StaticExtensions = @(
     ".js", ".css", ".png", ".jpg", ".jpeg",
     ".gif", ".svg", ".webp", ".ico",
     ".woff", ".woff2", ".ttf", ".otf"
 )
 
-# --- LOAD HAR ---
+# OPTIONAL: Exclude some hosts if you decide later (keep empty for now)
+$ExcludedHosts = @(
+    # "fonts.googleapis.com",
+    # "www.googletagmanager.com"
+)
+
+# -------------------------
+# LOAD HAR
+# -------------------------
 Write-Host "Loading HAR file: $HarPath"
 $harJson = Get-Content $HarPath -Raw | ConvertFrom-Json
 
-# --- EXTRACT URLS ---
+if (-not $harJson.log.entries) {
+    Write-Host "No entries found in HAR. Is this a valid HAR export?"
+    return
+}
+
+# -------------------------
+# EXTRACT STATIC ASSET URLS (HOST-AGNOSTIC)
+# -------------------------
 $urls = $harJson.log.entries |
-    Where-Object { $_.request.method -eq "GET" } |               # only GETs
+    Where-Object { $_.request.method -eq "GET" } |
     ForEach-Object {
-        $rawUrl = $_.request.url
-        try { [Uri]$rawUrl } catch { $null }                      # parse URL
+        try { [Uri]$_.request.url } catch { $null }
     } |
-    Where-Object { $_ -ne $null } |                              # valid URIs only
-    Where-Object { $_.Host -eq $Domain } |                       # only your domain
+    Where-Object { $_ -ne $null } |
+    Where-Object {
+        # Optional exclude list – currently empty => host agnostic
+        if ($ExcludedHosts.Count -eq 0) { $true }
+        else { -not ($ExcludedHosts -contains $_.Host) }
+    } |
     Where-Object {
         $ext = [System.IO.Path]::GetExtension($_.AbsolutePath).ToLower()
-        $StaticExtensions -contains $ext                         # only static files
+        $StaticExtensions -contains $ext
     } |
     ForEach-Object {
-        # Strip query string so cache key is clean (optional)
+        # Strip query string for cleaner cache keys (optional)
         $_.GetLeftPart([System.UriPartial]::Path)
     } |
     Sort-Object -Unique
 
-# --- OUTPUT ---
-Write-Host "Found $($urls.Count) static asset URLs. Writing to $OutputFile"
+Write-Host "Found $($urls.Count) static asset URLs."
+
+if ($urls.Count -eq 0) {
+    Write-Host "Nothing to do. No matching URLs found in the HAR."
+    return
+}
+
+# Save to file (nice for debugging / reuse)
 $urls | Set-Content -Encoding UTF8 $OutputFile
-Write-Host "Done."
+Write-Host "Written URL list to $OutputFile"
+
+# -------------------------
+# PRE-WARM CACHE
+# -------------------------
+$Headers = @{ "User-Agent" = $UserAgent }
+
+foreach ($Url in $urls) {
+    Write-Host "Warming cache for: $Url"
+    try {
+        $response = Invoke-WebRequest -Uri $Url -Headers $Headers -Method GET -TimeoutSec 30
+        Write-Host "  Status: $($response.StatusCode)"
+    }
+    catch {
+        Write-Host "  Error warming $Url : $($_.Exception.Message)"
+    }
+}
