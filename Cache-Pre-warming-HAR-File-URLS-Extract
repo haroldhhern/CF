@@ -1,16 +1,117 @@
-# Path to list of URLs generated from HAR
-$AssetList = "assets.txt"
+<#
+    HAR → Static URLs → Pre-warm Cloudflare cache (host-agnostic)
 
-# Headers – use a custom UA you can allow in Cloudflare WAF
+    Behavior:
+      - If assets.txt exists, script asks if you want to reuse it.
+      - If you reuse it → skips extraction and begins pre-warming.
+      - If not → extracts URLs again from HAR, overwrites assets.txt, then pre-warms.
+#>
+
+# -------------------------
+# CONFIG
+# -------------------------
+$HarPath     = "capture.har"      # Path to your HAR file
+$OutputFile  = "assets.txt"       # File to store extracted static URLs
+$UserAgent   = "Cache-Prewarm-Bot/1.0"
+
+# Static file extensions to treat as pre-warm candidates
+$StaticExtensions = @(
+    ".js", ".css", ".png", ".jpg", ".jpeg",
+    ".gif", ".svg", ".webp", ".ico",
+    ".woff", ".woff2", ".ttf", ".otf"
+)
+
+# Optional: Exclude hosts (leave empty for fully host-agnostic)
+$ExcludedHosts = @()
+
+# -------------------------
+# CHECK FOR EXISTING URL LIST
+# -------------------------
+if (Test-Path $OutputFile) {
+    Write-Host "URL list '$OutputFile' already exists."
+    $choice = Read-Host "Do you want to reuse this list? (Y/N)"
+
+    if ($choice -match '^[Yy]') {
+        Write-Host "Reusing existing URL list."
+        $urls = Get-Content $OutputFile
+        goto PREWARM
+    }
+    else {
+        Write-Host "Re-extracting URLs from HAR..."
+    }
+}
+
+# -------------------------
+# LOAD HAR + EXTRACT ASSET URLS
+# -------------------------
+Write-Host "Loading HAR file: $HarPath"
+
+if (!(Test-Path $HarPath)) {
+    Write-Host "ERROR: HAR file not found at path: $HarPath"
+    return
+}
+
+try {
+    $harJson = Get-Content $HarPath -Raw | ConvertFrom-Json
+}
+catch {
+    Write-Host "ERROR: Failed to parse HAR JSON: $($_.Exception.Message)"
+    return
+}
+
+if (-not $harJson.log.entries) {
+    Write-Host "ERROR: No entries found in HAR. Is this a valid HAR export?"
+    return
+}
+
+Write-Host "Extracting static asset URLs..."
+
+$urls = $harJson.log.entries |
+    Where-Object { $_.request.method -eq "GET" } |
+    ForEach-Object {
+        try { [Uri]$_.request.url } catch { $null }
+    } |
+    Where-Object { $_ -ne $null } |
+    Where-Object {
+        if ($ExcludedHosts.Count -eq 0) { $true }
+        else { -not ($ExcludedHosts -contains $_.Host) }
+    } |
+    Where-Object {
+        $ext = [System.IO.Path]::GetExtension($_.AbsolutePath).ToLower()
+        $StaticExtensions -contains $ext
+    } |
+    ForEach-Object {
+        # Keep full URL, including query string
+        $_.AbsoluteUri
+    } |
+    Sort-Object -Unique
+
+Write-Host "Found $($urls.Count) static asset URLs."
+
+if ($urls.Count -eq 0) {
+    Write-Host "No static URLs found — nothing to warm."
+    return
+}
+
+# Write new list
+$urls | Set-Content -Encoding UTF8 $OutputFile
+Write-Host "Saved new URL list to $OutputFile"
+
+# -------------------------
+# PRE-WARM LABEL (jump here if reusing assets.txt)
+# -------------------------
+:PREWARM
+
+$urls = Get-Content $OutputFile
+Write-Host "Starting pre-warm on $($urls.Count) static assets..."
+
 $Headers = @{
-    "User-Agent" = "Cache-Prewarm-Bot/1.0"
+    "User-Agent" = $UserAgent
     "Accept"     = "*/*"
 }
 
-$Urls = Get-Content $AssetList
-
-foreach ($Url in $Urls) {
-    Write-Host "Warming cache for: $Url"
+foreach ($Url in $urls) {
+    Write-Host "Warming: $Url"
     try {
         $response = Invoke-WebRequest -Uri $Url -Headers $Headers -Method GET -UseBasicParsing -TimeoutSec 30
         Write-Host "  Status: $($response.StatusCode)"
@@ -19,3 +120,5 @@ foreach ($Url in $Urls) {
         Write-Host "  Error warming $Url : $($_.Exception.Message)"
     }
 }
+
+Write-Host "Pre-warm finished."
