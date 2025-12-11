@@ -3,12 +3,12 @@
 
     Behavior:
       - If assets.txt exists, script asks if you want to reuse it.
-      - If you reuse it → skips extraction and begins pre-warming.
+      - If you reuse it → skips HAR parsing and begins pre-warming.
       - If not → extracts URLs again from HAR, overwrites assets.txt, then pre-warms.
 
-    Note:
-      - On Windows PowerShell 5.x, -UseBasicParsing avoids IE/cookie prompts.
-      - On PowerShell 7+, remove -UseBasicParsing (it’s not needed and will error).
+    Notes:
+      - On Windows PowerShell 5.x, we use -UseBasicParsing to avoid IE/cookie prompts.
+      - On PowerShell 7+, -UseBasicParsing is NOT used (it doesn't exist there).
 #>
 
 # -------------------------
@@ -30,6 +30,9 @@ $ExcludedHosts = @(
     # "fonts.googleapis.com",
     # "www.googletagmanager.com"
 )
+
+# Detect if we should use -UseBasicParsing (only valid on Windows PowerShell 5.x)
+$IsWindowsPowerShell5 = ($PSVersionTable.PSVersion.Major -lt 6)
 
 # -------------------------
 # FUNCTION: Extract URLs from HAR
@@ -80,9 +83,49 @@ function Get-StaticUrlsFromHar {
         } |
         Sort-Object -Unique
 
-    Write-Host "Found $($urls.Count) static asset URLs."
+    Write-Host "Found $($urls.Count) static asset URLs in HAR."
 
     return $urls
+}
+
+# -------------------------
+# FUNCTION: Pre-warm URLs
+# -------------------------
+function Invoke-PrewarmUrls {
+    param(
+        [string[]]$Urls,
+        [string]$UserAgent,
+        [bool]$UseBasicParsing
+    )
+
+    if (-not $Urls -or $Urls.Count -eq 0) {
+        Write-Host "No URLs to pre-warm. Exiting."
+        return
+    }
+
+    Write-Host "Starting pre-warm on $($Urls.Count) static assets..."
+    $Headers = @{
+        "User-Agent" = $UserAgent
+        "Accept"     = "*/*"
+    }
+
+    foreach ($Url in $Urls) {
+        Write-Host "Warming: $Url"
+        try {
+            if ($UseBasicParsing) {
+                $response = Invoke-WebRequest -Uri $Url -Headers $Headers -Method GET -UseBasicParsing -TimeoutSec 30
+            }
+            else {
+                $response = Invoke-WebRequest -Uri $Url -Headers $Headers -Method GET -TimeoutSec 30
+            }
+            Write-Host "  Status: $($response.StatusCode)"
+        }
+        catch {
+            Write-Host "  Error warming $Url : $($_.Exception.Message)"
+        }
+    }
+
+    Write-Host "Pre-warm finished."
 }
 
 # -------------------------
@@ -95,7 +138,7 @@ if (Test-Path $OutputFile) {
     $choice = Read-Host "Do you want to reuse this list? (Y/N)"
 
     if ($choice -match '^[Yy]') {
-        Write-Host "Reusing existing URL list."
+        Write-Host "Reusing existing URL list from $OutputFile"
         $urls = Get-Content $OutputFile
     }
     else {
@@ -136,4 +179,6 @@ else {
     Write-Host "Saved new URL list to $OutputFile"
 }
 
-# ---------------
+# Final safety check & pre-warm
+Write-Host "Loaded $($urls.Count) URLs from list. Proceeding to pre-warm..."
+Invoke-PrewarmUrls -Urls $urls -UserAgent $UserAgent -UseBasicParsing:$IsWindowsPowerShell5
