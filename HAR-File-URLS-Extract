@@ -1,0 +1,39 @@
+# --- CONFIG ---
+$HarPath    = "capture.har"          # Path to your HAR file
+$Domain     = "example.com"          # Your site hostname (no https)
+$OutputFile = "assets.txt"           # Where to write the asset URLs
+
+# Static file extensions to treat as pre-warm candidates
+$StaticExtensions = @(
+    ".js", ".css", ".png", ".jpg", ".jpeg",
+    ".gif", ".svg", ".webp", ".ico",
+    ".woff", ".woff2", ".ttf", ".otf"
+)
+
+# --- LOAD HAR ---
+Write-Host "Loading HAR file: $HarPath"
+$harJson = Get-Content $HarPath -Raw | ConvertFrom-Json
+
+# --- EXTRACT URLS ---
+$urls = $harJson.log.entries |
+    Where-Object { $_.request.method -eq "GET" } |               # only GETs
+    ForEach-Object {
+        $rawUrl = $_.request.url
+        try { [Uri]$rawUrl } catch { $null }                      # parse URL
+    } |
+    Where-Object { $_ -ne $null } |                              # valid URIs only
+    Where-Object { $_.Host -eq $Domain } |                       # only your domain
+    Where-Object {
+        $ext = [System.IO.Path]::GetExtension($_.AbsolutePath).ToLower()
+        $StaticExtensions -contains $ext                         # only static files
+    } |
+    ForEach-Object {
+        # Strip query string so cache key is clean (optional)
+        $_.GetLeftPart([System.UriPartial]::Path)
+    } |
+    Sort-Object -Unique
+
+# --- OUTPUT ---
+Write-Host "Found $($urls.Count) static asset URLs. Writing to $OutputFile"
+$urls | Set-Content -Encoding UTF8 $OutputFile
+Write-Host "Done."
