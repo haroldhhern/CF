@@ -1,0 +1,89 @@
+# =========================
+# Cloudflare Token Zone Access Checker
+# =========================
+
+$ApiToken = "PASTE_YOUR_TOKEN_HERE"  # <-- API Token (NOT Global API Key)
+$ApiToken = $ApiToken.Trim()
+
+# Toggle these probes as needed:
+$ProbeZoneDetails  = $true   # tests GET /zones/{zone_id}
+$ProbeDnsList       = $false  # tests GET /zones/{zone_id}/dns_records (needs DNS:Read)
+$ProbeZoneSettings  = $false  # tests a common zone settings read endpoint (may require Zone Settings:Read)
+
+$Headers = @{
+  Authorization = "Bearer $ApiToken"
+  "Content-Type" = "application/json"
+}
+
+function Invoke-CfApi {
+  param(
+    [Parameter(Mandatory=$true)][string]$Method,
+    [Parameter(Mandatory=$true)][string]$Uri
+  )
+  try {
+    $resp = Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -ErrorAction Stop
+    return $resp
+  } catch {
+    # Try to extract Cloudflare JSON error if available
+    $status = $null
+    try { $status = $_.Exception.Response.StatusCode.value__ } catch {}
+    $body = $null
+    try {
+      $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+      $body = $reader.ReadToEnd()
+    } catch {}
+    return [pscustomobject]@{
+      success = $false
+      http_status = $status
+      raw_error_body = $body
+      exception_message = $_.Exception.Message
+    }
+  }
+}
+
+Write-Host "1) Verifying token..." -ForegroundColor Cyan
+$verify = Invoke-CfApi -Method GET -Uri "https://api.cloudflare.com/client/v4/user/tokens/verify"
+
+if (-not $verify.success) {
+  Write-Host "Token verify FAILED." -ForegroundColor Red
+  $verify | Format-List *
+  return
+}
+
+Write-Host "Token verify OK." -ForegroundColor Green
+# The verify endpoint includes token status + policy info (useful for debugging scopes).
+$verify.result | Format-List *
+
+Write-Host "`n2) Listing zones visible to this token..." -ForegroundColor Cyan
+$zonesResp = Invoke-CfApi -Method GET -Uri "https://api.cloudflare.com/client/v4/zones?per_page=50"
+
+if (-not $zonesResp.success) {
+  Write-Host "Zone list FAILED." -ForegroundColor Red
+  $zonesResp | Format-List *
+  return
+}
+
+$zones = $zonesResp.result
+if (-not $zones -or $zones.Count -eq 0) {
+  Write-Host "No zones returned for this token." -ForegroundColor Yellow
+  return
+}
+
+Write-Host ("Zones returned: {0}" -f $zones.Count) -ForegroundColor Green
+
+# 3) Optional probes per zone
+$results = foreach ($z in $zones) {
+  $zoneId = $z.id
+  $zoneName = $z.name
+
+  $zoneDetailsOk = $null
+  $dnsListOk = $null
+  $zoneSettingsOk = $null
+  $zoneDetailsStatus = $null
+  $dnsListStatus = $null
+  $zoneSettingsStatus = $null
+
+  if ($ProbeZoneDetails) {
+    $r = Invoke-CfApi -Method GET -Uri "https://api.cloudflare.com/client/v4/zones/$zoneId"
+    $zoneDetailsOk = [bool]$r.success
+    $zoneDeta
