@@ -6,39 +6,65 @@ param(
   [int]$Position
 )
 
+if (-not (Test-Path $JsonFile)) {
+  Write-Host "File not found: $JsonFile" -ForegroundColor Red
+  return
+}
+
 $raw = Get-Content -Path $JsonFile -Raw
 
-if ($Position -lt 0 -or $Position -gt $raw.Length) {
+if ($Position -lt 0 -or $Position -ge $raw.Length) {
   Write-Host "Position $Position is out of range. File length is $($raw.Length)." -ForegroundColor Red
   return
 }
 
-# Convert 0-based position to line/column (1-based for humans)
-$before = $raw.Substring(0, $Position)
-$line = ([regex]::Matches($before, "`r?`n")).Count + 1
+# Split into lines (handles CRLF and LF)
+$lines = $raw -split "`n"
 
-# Column = chars since last newline
-$lastNl = $before.LastIndexOf("`n")
-$col = if ($lastNl -ge 0) { $before.Length - $lastNl } else { $before.Length + 1 }
+# Convert absolute character position to line+column
+$running = 0
+$lineNumber = 1
+$columnNumber = 1
+
+for ($i = 0; $i -lt $lines.Count; $i++) {
+  # Each line in $lines has no "\n" at end, but may still include trailing "\r"
+  $lineText = $lines[$i]
+  $lineLen = $lineText.Length
+
+  # Account for the newline character that was removed by split
+  $lineTotal = $lineLen + 1  # +1 for '\n'
+
+  if ($Position -lt ($running + $lineTotal)) {
+    $lineNumber = $i + 1
+    $columnNumber = ($Position - $running) + 1
+
+    # If this line ends with '\r' (CRLF), adjust column if position points at '\r'
+    # We keep it simple: show the line without '\r' for readability.
+    break
+  }
+
+  $running += $lineTotal
+}
 
 Write-Host "Approx location:" -ForegroundColor Cyan
-Write-Host "  Line   : $line"
-Write-Host "  Column : $col"
+Write-Host "  Line   : $lineNumber"
+Write-Host "  Column : $columnNumber"
 Write-Host ""
 
-# Show context lines
-$lines = $raw -split "`r?`n"
-$start = [Math]::Max(1, $line - 3)
-$end   = [Math]::Min($lines.Count, $line + 3)
+# Show context around the line
+$start = [Math]::Max(1, $lineNumber - 3)
+$end   = [Math]::Min($lines.Count, $lineNumber + 3)
 
 Write-Host "Context:" -ForegroundColor Cyan
-for ($i = $start; $i -le $end; $i++) {
-  $prefix = if ($i -eq $line) { ">>" } else { "  " }
-  "{0} {1,6}: {2}" -f $prefix, $i, $lines[$i-1]
+for ($ln = $start; $ln -le $end; $ln++) {
+  $prefix = if ($ln -eq $lineNumber) { ">>" } else { "  " }
+  $text = $lines[$ln - 1].TrimEnd("`r")
+  "{0} {1,6}: {2}" -f $prefix, $ln, $text
 }
+
 Write-Host ""
 
-# Show a short character window around the exact position
+# Show a small snippet around the exact position with a caret marker
 $win = 80
 $from = [Math]::Max(0, $Position - $win)
 $to   = [Math]::Min($raw.Length, $Position + $win)
