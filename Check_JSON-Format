@@ -1,133 +1,51 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$JsonFile
+  [string]$JsonFile,
+
+  [Parameter(Mandatory = $true)]
+  [int]$Position
 )
 
-function Write-Fail {
-  param([string]$Message)
-  Write-Host "❌ $Message" -ForegroundColor Red
-}
-
-function Write-Ok {
-  param([string]$Message)
-  Write-Host "✔ $Message" -ForegroundColor Green
-}
-
-if (-not (Test-Path $JsonFile)) {
-  Write-Fail "File not found: $JsonFile"
-  return
-}
-
 $raw = Get-Content -Path $JsonFile -Raw
+
+if ($Position -lt 0 -or $Position -gt $raw.Length) {
+  Write-Host "Position $Position is out of range. File length is $($raw.Length)." -ForegroundColor Red
+  return
+}
+
+# Convert 0-based position to line/column (1-based for humans)
+$before = $raw.Substring(0, $Position)
+$line = ([regex]::Matches($before, "`r?`n")).Count + 1
+
+# Column = chars since last newline
+$lastNl = $before.LastIndexOf("`n")
+$col = if ($lastNl -ge 0) { $before.Length - $lastNl } else { $before.Length + 1 }
+
+Write-Host "Approx location:" -ForegroundColor Cyan
+Write-Host "  Line   : $line"
+Write-Host "  Column : $col"
+Write-Host ""
+
+# Show context lines
 $lines = $raw -split "`r?`n"
+$start = [Math]::Max(1, $line - 3)
+$end   = [Math]::Min($lines.Count, $line + 3)
 
-# --- 1) JSON syntax validation (best effort) ---
-# In Windows PowerShell 5.1, ConvertFrom-Json does not reliably provide line/col,
-# so we validate syntax here and continue.
-try {
-  $json = $raw | ConvertFrom-Json -ErrorAction Stop
-  Write-Ok "JSON syntax valid"
-} catch {
-  Write-Fail "Invalid JSON syntax"
-  Write-Host ("   " + $_.Exception.Message) -ForegroundColor Red
-
-  # Best-effort: try to extract "line" / "position" from exception message (varies by version)
-  $msg = $_.Exception.Message
-  $lineNum = $null
-  $posNum  = $null
-
-  if ($msg -match 'line\s+(\d+)') { $lineNum = [int]$Matches[1] }
-  if ($msg -match 'position\s+(\d+)') { $posNum = [int]$Matches[1] }
-
-  if ($lineNum) {
-    Write-Host "   Approx line: $lineNum" -ForegroundColor Yellow
-    if ($lineNum -ge 1 -and $lineNum -le $lines.Count) {
-      $previewStart = [Math]::Max(1, $lineNum - 2)
-      $previewEnd   = [Math]::Min($lines.Count, $lineNum + 2)
-      Write-Host ""
-      Write-Host "   Context:" -ForegroundColor Yellow
-      for ($i = $previewStart; $i -le $previewEnd; $i++) {
-        $prefix = if ($i -eq $lineNum) { ">>" } else { "  " }
-        Write-Host ("   {0} {1,5}: {2}" -f $prefix, $i, $lines[$i-1])
-      }
-      Write-Host ""
-    }
-  }
-
-  return
+Write-Host "Context:" -ForegroundColor Cyan
+for ($i = $start; $i -le $end; $i++) {
+  $prefix = if ($i -eq $line) { ">>" } else { "  " }
+  "{0} {1,6}: {2}" -f $prefix, $i, $lines[$i-1]
 }
-
-# --- 2) Root must be an array ---
-if ($json -isnot [System.Array]) {
-  Write-Fail "Root JSON element must be an ARRAY. Example:"
-  Write-Host '   [ { "key": "ip:1.2.3.4", "value": "1" } ]' -ForegroundColor Yellow
-  return
-}
-
-Write-Ok "Root is array"
-Write-Ok ("Records found: {0}" -f $json.Count)
 Write-Host ""
 
-# Helper: best-effort line lookup for a key
-function Find-ApproxLineForKey {
-  param([string]$Key)
-  if ([string]::IsNullOrWhiteSpace($Key)) { return $null }
+# Show a short character window around the exact position
+$win = 80
+$from = [Math]::Max(0, $Position - $win)
+$to   = [Math]::Min($raw.Length, $Position + $win)
+$snippet = $raw.Substring($from, $to - $from)
 
-  # Escape and search; first match only
-  $pattern = [regex]::Escape($Key)
-  $m = $lines | Select-String -Pattern $pattern | Select-Object -First 1
-  if ($m) { return $m.LineNumber }
-  return $null
-}
-
-$errors = 0
-
-for ($i = 0; $i -lt $json.Count; $i++) {
-  $item = $json[$i]
-
-  $key = $null
-  try { $key = [string]$item.key } catch {}
-
-  try {
-    # Must be an object with key/value props
-    if (-not ($item.PSObject.Properties.Name -contains "key"))   { throw "Missing 'key' property" }
-    if (-not ($item.PSObject.Properties.Name -contains "value")) { throw "Missing 'value' property" }
-
-    # key must be non-empty string
-    if (-not ($item.key -is [string]) -or [string]::IsNullOrWhiteSpace([string]$item.key)) {
-      throw "'key' must be a non-empty string"
-    }
-
-    # value must be a string for KV bulk
-    if ($item.value -isnot [string]) {
-      throw "'value' must be a string (use `"1`", not 1)"
-    }
-
-    $ln = Find-ApproxLineForKey -Key $item.key
-    if ($ln) {
-      Write-Host ("✔ Record #{0} OK  (key='{1}' ~ line {2})" -f $i, $item.key, $ln)
-    } else {
-      Write-Host ("✔ Record #{0} OK  (key='{1}')" -f $i, $item.key)
-    }
-
-  } catch {
-    $errors++
-    Write-Host ("❌ Record #{0} FAILED" -f $i) -ForegroundColor Red
-    Write-Host ("   Reason : {0}" -f $_.Exception.Message) -ForegroundColor Red
-    if ($key) {
-      Write-Host ("   Key    : {0}" -f $key) -ForegroundColor Red
-      $ln = Find-ApproxLineForKey -Key $key
-      if ($ln) { Write-Host ("   Approx line: {0}" -f $ln) -ForegroundColor Yellow }
-    } else {
-      Write-Host "   Key    : (missing/unreadable)" -ForegroundColor Red
-    }
-    Write-Host ""
-  }
-}
-
+Write-Host "Snippet around position $Position:" -ForegroundColor Cyan
+Write-Host $snippet
 Write-Host ""
-if ($errors -eq 0) {
-  Write-Host "🎉 JSON file is VALID for Cloudflare KV bulk upload." -ForegroundColor Green
-} else {
-  Write-Host ("⚠ Found {0} invalid record(s). Fix them before uploading." -f $errors) -ForegroundColor Yellow
-}
+Write-Host "Marker:" -ForegroundColor Cyan
+Write-Host (" " * ($Position - $from) + "^")
