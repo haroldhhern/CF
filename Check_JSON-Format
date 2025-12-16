@@ -27,19 +27,13 @@ $lineNumber = 1
 $columnNumber = 1
 
 for ($i = 0; $i -lt $lines.Count; $i++) {
-  # Each line in $lines has no "\n" at end, but may still include trailing "\r"
   $lineText = $lines[$i]
   $lineLen = $lineText.Length
-
-  # Account for the newline character that was removed by split
   $lineTotal = $lineLen + 1  # +1 for '\n'
 
   if ($Position -lt ($running + $lineTotal)) {
     $lineNumber = $i + 1
     $columnNumber = ($Position - $running) + 1
-
-    # If this line ends with '\r' (CRLF), adjust column if position points at '\r'
-    # We keep it simple: show the line without '\r' for readability.
     break
   }
 
@@ -58,7 +52,7 @@ $end   = [Math]::Min($lines.Count, $lineNumber + 3)
 Write-Host "Context:" -ForegroundColor Cyan
 for ($ln = $start; $ln -le $end; $ln++) {
   $prefix = if ($ln -eq $lineNumber) { ">>" } else { "  " }
-  $text = $lines[$ln - 1].TrimEnd("`r")
+  $text = $lines[$ln - 1] -replace "`r$", ""
   "{0} {1,6}: {2}" -f $prefix, $ln, $text
 }
 
