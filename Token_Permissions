@@ -86,4 +86,34 @@ $results = foreach ($z in $zones) {
   if ($ProbeZoneDetails) {
     $r = Invoke-CfApi -Method GET -Uri "https://api.cloudflare.com/client/v4/zones/$zoneId"
     $zoneDetailsOk = [bool]$r.success
-    $zoneDeta
+    $zoneDetailsStatus = if ($r.success) { 200 } else { $r.http_status }
+  }
+
+  if ($ProbeDnsList) {
+    # DNS list endpoint (needs DNS:Read) :contentReference[oaicite:2]{index=2}
+    $r = Invoke-CfApi -Method GET -Uri "https://api.cloudflare.com/client/v4/zones/$zoneId/dns_records?per_page=1"
+    $dnsListOk = [bool]$r.success
+    $dnsListStatus = if ($r.success) { 200 } else { $r.http_status }
+  }
+
+  if ($ProbeZoneSettings) {
+    # One common zone setting read endpoint (permission varies by org setup)
+    $r = Invoke-CfApi -Method GET -Uri "https://api.cloudflare.com/client/v4/zones/$zoneId/settings/min_tls_version"
+    $zoneSettingsOk = [bool]$r.success
+    $zoneSettingsStatus = if ($r.success) { 200 } else { $r.http_status }
+  }
+
+  [pscustomobject]@{
+    ZoneName = $zoneName
+    ZoneId   = $zoneId
+    ZoneDetails_OK = $zoneDetailsOk
+    ZoneDetails_HTTP = $zoneDetailsStatus
+    DNSList_OK = $dnsListOk
+    DNSList_HTTP = $dnsListStatus
+    ZoneSettings_OK = $zoneSettingsOk
+    ZoneSettings_HTTP = $zoneSettingsStatus
+  }
+}
+
+Write-Host "`n3) Results:" -ForegroundColor Cyan
+$results | Sort-Object ZoneName | Format-Table -AutoSize
