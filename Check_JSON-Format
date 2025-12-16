@@ -1,8 +1,8 @@
 param(
-  [Parameter(Mandatory = $true)]
+  [Parameter(Mandatory=$true)]
   [string]$JsonFile,
 
-  [Parameter(Mandatory = $true)]
+  [Parameter(Mandatory=$true)]
   [int]$Position
 )
 
@@ -14,14 +14,14 @@ if (-not (Test-Path $JsonFile)) {
 $raw = Get-Content -Path $JsonFile -Raw
 
 if ($Position -lt 0 -or $Position -ge $raw.Length) {
-  Write-Host "Position $Position is out of range. File length is $($raw.Length)." -ForegroundColor Red
+  Write-Host ("Position " + $Position + " is out of range. File length is " + $raw.Length + ".") -ForegroundColor Red
   return
 }
 
-# Split into lines (handles CRLF and LF)
+# Split lines safely (works for CRLF and LF)
 $lines = $raw -split "`n"
 
-# Convert absolute character position to line+column
+# Find line/column from absolute character position
 $running = 0
 $lineNumber = 1
 $columnNumber = 1
@@ -29,7 +29,7 @@ $columnNumber = 1
 for ($i = 0; $i -lt $lines.Count; $i++) {
   $lineText = $lines[$i]
   $lineLen = $lineText.Length
-  $lineTotal = $lineLen + 1  # +1 for '\n'
+  $lineTotal = $lineLen + 1  # +1 for the '\n' removed by split
 
   if ($Position -lt ($running + $lineTotal)) {
     $lineNumber = $i + 1
@@ -41,31 +41,49 @@ for ($i = 0; $i -lt $lines.Count; $i++) {
 }
 
 Write-Host "Approx location:" -ForegroundColor Cyan
-Write-Host "  Line   : $lineNumber"
-Write-Host "  Column : $columnNumber"
+Write-Host ("  Line   : " + $lineNumber)
+Write-Host ("  Column : " + $columnNumber)
 Write-Host ""
 
-# Show context around the line
-$start = [Math]::Max(1, $lineNumber - 3)
-$end   = [Math]::Min($lines.Count, $lineNumber + 3)
+# Context range
+$start = $lineNumber - 3
+if ($start -lt 1) { $start = 1 }
+
+$end = $lineNumber + 3
+if ($end -gt $lines.Count) { $end = $lines.Count }
 
 Write-Host "Context:" -ForegroundColor Cyan
+
 for ($ln = $start; $ln -le $end; $ln++) {
-  $prefix = if ($ln -eq $lineNumber) { ">>" } else { "  " }
-  $text = $lines[$ln - 1] -replace "`r$", ""
-  "{0} {1,6}: {2}" -f $prefix, $ln, $text
+  $prefix = "  "
+  if ($ln -eq $lineNumber) { $prefix = ">>" }
+
+  # Remove trailing CR if present (avoid regex; use char 13)
+  $text = $lines[$ln - 1]
+  if ($text.Length -gt 0 -and $text[$text.Length - 1] -eq [char]13) {
+    $text = $text.Substring(0, $text.Length - 1)
+  }
+
+  Write-Host ($prefix + " " + $ln + ": " + $text)
 }
 
 Write-Host ""
 
-# Show a small snippet around the exact position with a caret marker
+# Show snippet around exact position
 $win = 80
-$from = [Math]::Max(0, $Position - $win)
-$to   = [Math]::Min($raw.Length, $Position + $win)
+$from = $Position - $win
+if ($from -lt 0) { $from = 0 }
+
+$to = $Position + $win
+if ($to -gt $raw.Length) { $to = $raw.Length }
+
 $snippet = $raw.Substring($from, $to - $from)
 
-Write-Host "Snippet around position $Position:" -ForegroundColor Cyan
+Write-Host ("Snippet around position " + $Position + ":") -ForegroundColor Cyan
 Write-Host $snippet
 Write-Host ""
 Write-Host "Marker:" -ForegroundColor Cyan
-Write-Host (" " * ($Position - $from) + "^")
+
+$spaces = $Position - $from
+if ($spaces -lt 0) { $spaces = 0 }
+Write-Host ((" " * $spaces) + "^")
