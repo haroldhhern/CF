@@ -1,3 +1,5 @@
+# Need to enter the file path and for Position, the line number with the error that is provided after trying to upload the json file
+
 param(
   [Parameter(Mandatory=$true)]
   [string]$JsonFile,
