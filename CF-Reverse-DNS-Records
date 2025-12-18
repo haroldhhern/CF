@@ -23,6 +23,39 @@ a loop guard:
 
 - If a request already has X-SIAList-Worker: 1, the Worker bypasses its logic
   and immediately fetches origin. This prevents accidental recursion/loops.
+
+================================================================================
+ KV FORMAT (SIAList_trusted_clients)
+================================================================================
+
+IP / CIDR (same "ip:" prefix for both IPv4 and IPv6):
+
+- Exact IPv4:
+    key   = "ip:107.130.27.151"
+    value = "1"   (trusted) or "0" (not trusted)
+
+- IPv4 CIDR:
+    key   = "ip:204.250.2.0/15"
+    value = "1"   (trusted) or "0" (not trusted)
+
+- Exact IPv6:
+    key   = "ip:2600:387:15:2017::1"
+    value = "1"   (trusted) or "0"
+
+- IPv6 CIDR:
+    key   = "ip:2600:387:15:2017::/64"
+    key   = "ip:2600:387:15:2017::1/128"
+    value = "1"   (trusted) or "0"
+
+PTR:
+
+- Exact hostname:
+    key   = "ptr:full.ptr.hostname.example"
+    value = "1"
+
+- Wildcard suffix:
+    key   = "ptr:.example.com"
+    value = "1"
 */
 
 const DEBUG_MODE = false; // Enable debugging ONLY when needed
@@ -116,11 +149,10 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
 
   // ----- IP: exact + CIDR (IPv4 + IPv6) -----
   if (ip) {
+    // 1) Exact IP matches (try normalized + raw forms)
     const candidates = [];
     candidates.push(`ip:${ip}`);
-    if (ipRaw !== ip) {
-      candidates.push(`ip:${ipRaw}`);
-    }
+    if (ipRaw !== ip) candidates.push(`ip:${ipRaw}`);
 
     for (const key of candidates) {
       const vIp = await kv.get(key);
@@ -135,14 +167,16 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
       }
     }
 
+    // 2) CIDR matches: list all ip:<cidr> keys
     let cursor;
     do {
       const listResp = await kv.list({ prefix: "ip:", cursor });
-      for (const entry of listResp.keys) {
-        const key = entry.name;
-        const raw = key.slice(3);
 
-        if (!raw.includes("/")) continue;
+      for (const entry of listResp.keys) {
+        const key = entry.name;   // e.g. "ip:204.250.2.0/15" or "ip:2600:387:15:2017::/64"
+        const raw = key.slice(3); // strip "ip:"
+
+        if (!raw.includes("/")) continue; // skip non-CIDR
 
         const parts = raw.split("/");
         if (parts.length !== 2) continue;
@@ -153,6 +187,8 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
 
         const isCidrV6 = cidrIp.includes(":");
         const isClientV6 = ip.includes(":");
+
+        // only compare v4<->v4 or v6<->v6
         if (isCidrV6 !== isClientV6) continue;
 
         const inRange = isCidrV6
@@ -179,8 +215,9 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
 
   // ----- PTR: exact + leading-dot suffix -----
   if (ptr) {
+    // 1) Exact PTR hostname
     let ptrKey = `ptr:${ptr}`;
-    let vFull = await kv.get(ptrKey);
+    const vFull = await kv.get(ptrKey);
     if (vFull !== null) {
       const norm = vFull.trim().toLowerCase();
       if (norm === "1" || norm === "true") {
@@ -191,10 +228,12 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
       }
     }
 
+    // 2) Suffix wildcards: ptr:.<suffix>
     const hostParts = ptr.toLowerCase().split(".");
     for (let i = 1; i < hostParts.length - 1; i++) {
       const suffix = hostParts.slice(i).join(".");
       ptrKey = `ptr:.${suffix}`;
+
       const vSuffix = await kv.get(ptrKey);
       if (vSuffix !== null) {
         const norm = vSuffix.trim().toLowerCase();
@@ -209,4 +248,128 @@ async function getTrustFlags(env, ip, ipRaw, ptr) {
   }
 
   return out;
+}
+
+async function getPtr(ip) {
+  if (!ip) return null;
+
+  const queryName = ip.includes(":") ? ip6ToArpa(ip) : ip4ToArpa(ip);
+
+  const resp = await fetch(
+    `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(queryName)}&type=PTR`,
+    { headers: { accept: "application/dns-json" } }
+  );
+
+  if (!resp.ok) return null;
+
+  const json = await resp.json();
+  if (!json.Answer || json.Answer.length === 0) return null;
+
+  // PTR answers often end with a trailing dot.
+  return json.Answer[0].data.replace(/\.$/, "");
+}
+
+function ip4ToArpa(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return ip;
+  return parts.reverse().join(".") + ".in-addr.arpa";
+}
+
+function ip6ToArpa(ip) {
+  const full = normalizeIPv6(ip);
+  const hex = full.replace(/:/g, ""); // 32 hex chars
+  return hex.split("").reverse().join(".") + ".ip6.arpa";
+}
+
+// =============================================================================
+// IPv6 helpers (NORMALIZATION + CIDR SUPPORT)
+// =============================================================================
+
+// Normalize IPv6 to 8 groups of 4 hex digits, lowercase.
+// e.g. "2600:387:15:2017::1" -> "2600:0387:0015:2017:0000:0000:0000:0001"
+function normalizeIPv6(ip) {
+  const addr = (ip || "").toLowerCase();
+  if (!addr) return "";
+
+  // Already expanded (no "::")
+  if (!addr.includes("::")) {
+    const parts = addr.split(":");
+    if (parts.length !== 8) return addr; // fallback if weird format
+    return parts.map(h => h.padStart(4, "0")).join(":");
+  }
+
+  // Has "::" compression
+  const seg = addr.split("::");
+  const headStr = seg[0] || "";
+  const tailStr = seg[1] || "";
+
+  const head = headStr ? headStr.split(":") : [];
+  const tail = tailStr ? tailStr.split(":") : [];
+
+  const missing = 8 - (head.length + tail.length);
+  if (missing < 0) return addr;
+
+  const zeros = Array(missing).fill("0");
+  const full = [...head, ...zeros, ...tail];
+
+  if (full.length !== 8) return addr;
+
+  return full.map(h => h.padStart(4, "0")).join(":");
+}
+
+function ipv6ToBigInt(ip) {
+  const full = normalizeIPv6(ip);
+  const hex = full.replace(/:/g, ""); // 32 hex chars
+  try {
+    return BigInt("0x" + hex);
+  } catch {
+    return null;
+  }
+}
+
+function ipv6InCidr(ip, cidrIp, prefix) {
+  if (prefix < 0 || prefix > 128) return false;
+
+  const ipInt = ipv6ToBigInt(ip);
+  const cidrInt = ipv6ToBigInt(cidrIp);
+  if (ipInt === null || cidrInt === null) return false;
+
+  const totalBits = 128n;
+  const p = BigInt(prefix);
+  const hostBits = totalBits - p;
+
+  const allOnes128 = (1n << totalBits) - 1n;
+  const mask = p === 0n ? 0n : (~((1n << hostBits) - 1n) & allOnes128);
+
+  return (ipInt & mask) === (cidrInt & mask);
+}
+
+// =============================================================================
+// IPv4 helpers (CIDR SUPPORT)
+// =============================================================================
+
+function ip4InCidr(ip, cidrIp, prefix) {
+  if (prefix < 0 || prefix > 32) return false;
+
+  const ipInt = ipv4ToInt(ip);
+  const cidrInt = ipv4ToInt(cidrIp);
+  if (ipInt === null || cidrInt === null) return false;
+
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  return (ipInt & mask) === (cidrInt & mask);
+}
+
+function ipv4ToInt(ip) {
+  const parts = (ip || "").split(".");
+  if (parts.length !== 4) return null;
+
+  const nums = parts.map(p => parseInt(p, 10));
+  if (nums.some(n => Number.isNaN(n) || n < 0 || n > 255)) return null;
+
+  return (
+    ((nums[0] << 24) >>> 0) +
+    ((nums[1] << 16) >>> 0) +
+    ((nums[2] << 8) >>> 0) +
+    (nums[3] >>> 0)
+  );
 }
