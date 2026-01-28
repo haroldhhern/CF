@@ -1,0 +1,1 @@
+(http.host eq "scan.example.com") and ((len(http.request.headers["x-api-key"]) eq 0) or all(http.request.headers["x-api-key"][*] ne "YOUR_EXPECTED_API_KEY"))
