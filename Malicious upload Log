@@ -1,0 +1,18 @@
+(
+  cf.waf.content_scan.has_obj
+  and any(cf.waf.content_scan.obj_results[*] in {"infected" "suspicious"})
+  and http.request.method in {"POST" "PUT" "PATCH"}
+
+  and (
+    lower(http.request.headers["content-type"][0]) contains "multipart/form-data"
+    or lower(http.request.headers["content-type"][0]) contains "application/octet-stream"
+    or lower(http.request.headers["content-type"][0]) contains "application/x-www-form-urlencoded"
+  )
+
+  and not cf.bot_management.verified_bot
+
+  and (
+    cf.bot_management.score le 30
+    or cf.bot_management.ja4 ne ""
+  )
+)
