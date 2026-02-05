@@ -1,0 +1,18 @@
+$accountId = "YOUR_ACCOUNT_ID"
+$apiToken  = "YOUR_API_TOKEN"
+$uri       = "https://api.cloudflare.com/client/v4/graphql"
+
+$query = @'
+{
+  "query": "query { viewer { accounts(filter: { accountTag: \"$accountId\" }) { aegisIpUtilizationAdaptiveGroups(limit: 100, filter: { datetime_gt: \"2025-01-10T00:00:00Z\" }) { max { utilizationPct } dimensions { datetimeFiveMinutes egressIp popName } } } } }"
+}' -replace '\$accountId', $accountId
+
+$headers = @{
+    "Authorization" = "Bearer $apiToken"
+    "Content-Type"  = "application/json"
+}
+
+$response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $query
+
+$utilizationData = $response.data.viewer.accounts.aegisIpUtilizationAdaptiveGroups
+$utilizationData | Select-Object -ExpandProperty dimensions -Property @{Name="MaxUtil"; Expression={$_.max.utilizationPct}}
