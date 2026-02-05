@@ -1,18 +1,53 @@
+# 1. Define Authentication
 $accountId = "YOUR_ACCOUNT_ID"
 $apiToken  = "YOUR_API_TOKEN"
 $uri       = "https://api.cloudflare.com/client/v4/graphql"
 
-$query = @'
-{
-  "query": "query { viewer { accounts(filter: { accountTag: \"$accountId\" }) { aegisIpUtilizationAdaptiveGroups(limit: 100, filter: { datetime_gt: \"2025-01-10T00:00:00Z\" }) { max { utilizationPct } dimensions { datetimeFiveMinutes egressIp popName } } } } }"
-}' -replace '\$accountId', $accountId
+# 2. Define the GraphQL Query (Using a Here-String for readability)
+$gqlQuery = @"
+query {
+  viewer {
+    accounts(filter: { accountTag: "$accountId" }) {
+      aegisIpUtilizationAdaptiveGroups(
+        limit: 100,
+        filter: {
+          datetime_gt: "2025-01-10T00:00:00Z"
+        }
+      ) {
+        max {
+          utilizationPct
+        }
+        dimensions {
+          datetimeFiveMinutes
+          egressIp
+          popName
+        }
+      }
+    }
+  }
+}
+"@
 
+# 3. Wrap the query in a JSON body object
+$body = @{ query = $gqlQuery } | ConvertTo-Json
+
+# 4. Set Headers
 $headers = @{
     "Authorization" = "Bearer $apiToken"
     "Content-Type"  = "application/json"
 }
 
-$response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $query
-
-$utilizationData = $response.data.viewer.accounts.aegisIpUtilizationAdaptiveGroups
-$utilizationData | Select-Object -ExpandProperty dimensions -Property @{Name="MaxUtil"; Expression={$_.max.utilizationPct}}
+# 5. Execute the Request
+try {
+    $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body $body
+    
+    # Check for GraphQL-level errors (even if HTTP status is 200)
+    if ($response.errors) {
+        Write-Error "GraphQL Error: $($response.errors.message)"
+    } else {
+        # Output the results
+        $response.data.viewer.accounts.aegisIpUtilizationAdaptiveGroups
+    }
+} catch {
+    Write-Error "HTTP Request Failed: $_"
+}
