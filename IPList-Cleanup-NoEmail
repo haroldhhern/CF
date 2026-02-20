@@ -1,16 +1,6 @@
 export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
-    if (url.pathname === "/run") {
-      const key = request.headers.get("x-run-key");
-      if (!key || key !== env.RUN_KEY) return new Response("Forbidden", { status: 403 });
-
-      ctx.waitUntil(run(env));
-      return new Response("OK: triggered cleanup", { status: 200 });
-    }
-
-    return new Response("OK: cron worker deployed", { status: 200 });
+  async fetch() {
+    return new Response("IP List Expirer running via cron only.");
   },
 
   async scheduled(event, env, ctx) {
@@ -18,9 +8,7 @@ export default {
   },
 };
 
-/** =========================
- *  Date helpers (New York)
- *  ========================= */
+/** Date helpers */
 
 function ymdInNY(offsetDays = 0) {
   const dt = new Date(Date.now() + offsetDays * 86400000);
@@ -41,15 +29,8 @@ function ymdInNY(offsetDays = 0) {
 }
 
 function mmddyyyyToYMD(mmddyyyy) {
-  const mm = mmddyyyy.slice(0, 2);
-  const dd = mmddyyyy.slice(3, 5);
-  const yyyy = mmddyyyy.slice(6, 10);
-  return `${yyyy}-${mm}-${dd}`;
+  return `${mmddyyyy.slice(6,10)}-${mmddyyyy.slice(0,2)}-${mmddyyyy.slice(3,5)}`;
 }
-
-/** =========================
- *  Comment parsing
- *  ========================= */
 
 function extractRemoveDateMMDDYYYY(comment) {
   const text = (comment || "").toString();
@@ -57,9 +38,7 @@ function extractRemoveDateMMDDYYYY(comment) {
   return m ? m[1] : null;
 }
 
-/** =========================
- *  Cloudflare Lists API
- *  ========================= */
+/** Cloudflare Lists API */
 
 async function listAllItems(env) {
   const all = [];
@@ -80,7 +59,8 @@ async function listAllItems(env) {
     });
 
     const data = await res.json();
-    if (!data?.success) throw new Error(`List fetch failed: ${JSON.stringify(data?.errors || data)}`);
+    if (!data?.success)
+      throw new Error(`List fetch failed: ${JSON.stringify(data?.errors || data)}`);
 
     all.push(...(data.result || []));
     cursor = data.result_info?.cursors?.after;
@@ -111,13 +91,12 @@ async function deleteItemsById(env, ids) {
     );
 
     const data = await res.json();
-    if (!data?.success) throw new Error(`Delete failed: ${JSON.stringify(data?.errors || data)}`);
+    if (!data?.success)
+      throw new Error(`Delete failed: ${JSON.stringify(data?.errors || data)}`);
   }
 }
 
-/** =========================
- *  Main Job
- *  ========================= */
+/** Main job */
 
 async function run(env) {
   for (const k of ["CF_ACCOUNT_ID", "CF_LIST_ID", "CF_API_TOKEN"]) {
@@ -130,30 +109,22 @@ async function run(env) {
   const expired = [];
 
   for (const item of items) {
-    const comment = (item.comment || "").toString();
-    const removeMMDDYYYY = extractRemoveDateMMDDYYYY(comment);
-    if (!removeMMDDYYYY) continue;
+    const remove = extractRemoveDateMMDDYYYY(item.comment);
+    if (!remove) continue;
 
-    const removeYMD = mmddyyyyToYMD(removeMMDDYYYY);
-
-    if (removeYMD <= todayYMD) {
-      expired.push({
-        id: item.id,
-        ip: item.ip,
-        comment,
-        removeDate: removeMMDDYYYY,
-      });
+    if (mmddyyyyToYMD(remove) <= todayYMD) {
+      expired.push(item.id);
     }
   }
 
   if (expired.length === 0) {
-    console.log(`[ip-list-expirer] ${todayYMD}: nothing to delete.`);
+    console.log(`[ip-list-expirer] ${todayYMD}: nothing to delete`);
     return;
   }
 
-  console.log(`[ip-list-expirer] ${todayYMD}: deleting ${expired.length} expired item(s)`);
+  console.log(`[ip-list-expirer] ${todayYMD}: deleting ${expired.length} expired entries`);
 
-  await deleteItemsById(env, expired.map(x => x.id));
+  await deleteItemsById(env, expired);
 
-  console.log(`[ip-list-expirer] ${todayYMD}: deletion complete.`);
+  console.log(`[ip-list-expirer] ${todayYMD}: deletion complete`);
 }
