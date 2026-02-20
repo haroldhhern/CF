@@ -1,0 +1,159 @@
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/run") {
+      const key = request.headers.get("x-run-key");
+      if (!key || key !== env.RUN_KEY) return new Response("Forbidden", { status: 403 });
+
+      ctx.waitUntil(run(env));
+      return new Response("OK: triggered cleanup", { status: 200 });
+    }
+
+    return new Response("OK: cron worker deployed", { status: 200 });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(run(env));
+  },
+};
+
+/** =========================
+ *  Date helpers (New York)
+ *  ========================= */
+
+function ymdInNY(offsetDays = 0) {
+  const dt = new Date(Date.now() + offsetDays * 86400000);
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(dt);
+
+  const y = parts.find(p => p.type === "year")?.value;
+  const m = parts.find(p => p.type === "month")?.value;
+  const d = parts.find(p => p.type === "day")?.value;
+
+  if (!y || !m || !d) throw new Error("Failed to compute NY date parts");
+  return `${y}-${m}-${d}`;
+}
+
+function mmddyyyyToYMD(mmddyyyy) {
+  const mm = mmddyyyy.slice(0, 2);
+  const dd = mmddyyyy.slice(3, 5);
+  const yyyy = mmddyyyy.slice(6, 10);
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/** =========================
+ *  Comment parsing
+ *  ========================= */
+
+function extractRemoveDateMMDDYYYY(comment) {
+  const text = (comment || "").toString();
+  const m = text.match(/ticket\s*\d+\s*-\s*remove\s+(\d{2}\/\d{2}\/\d{4})/i);
+  return m ? m[1] : null;
+}
+
+/** =========================
+ *  Cloudflare Lists API
+ *  ========================= */
+
+async function listAllItems(env) {
+  const all = [];
+  let cursor;
+
+  while (true) {
+    const url = new URL(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/rules/lists/${env.CF_LIST_ID}/items`
+    );
+    url.searchParams.set("per_page", "500");
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const res = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${env.CF_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const data = await res.json();
+    if (!data?.success) throw new Error(`List fetch failed: ${JSON.stringify(data?.errors || data)}`);
+
+    all.push(...(data.result || []));
+    cursor = data.result_info?.cursors?.after;
+    if (!cursor) break;
+  }
+
+  return all;
+}
+
+async function deleteItemsById(env, ids) {
+  const chunkSize = 200;
+
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/rules/lists/${env.CF_LIST_ID}/items`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${env.CF_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          items: chunk.map(id => ({ id }))
+        }),
+      }
+    );
+
+    const data = await res.json();
+    if (!data?.success) throw new Error(`Delete failed: ${JSON.stringify(data?.errors || data)}`);
+  }
+}
+
+/** =========================
+ *  Main Job
+ *  ========================= */
+
+async function run(env) {
+  for (const k of ["CF_ACCOUNT_ID", "CF_LIST_ID", "CF_API_TOKEN"]) {
+    if (!env[k]) throw new Error(`Missing env var: ${k}`);
+  }
+
+  const todayYMD = ymdInNY(0);
+  const items = await listAllItems(env);
+
+  const expired = [];
+
+  for (const item of items) {
+    const comment = (item.comment || "").toString();
+    const removeMMDDYYYY = extractRemoveDateMMDDYYYY(comment);
+    if (!removeMMDDYYYY) continue;
+
+    const removeYMD = mmddyyyyToYMD(removeMMDDYYYY);
+
+    if (removeYMD <= todayYMD) {
+      expired.push({
+        id: item.id,
+        ip: item.ip,
+        comment,
+        removeDate: removeMMDDYYYY,
+      });
+    }
+  }
+
+  if (expired.length === 0) {
+    console.log(`[ip-list-expirer] ${todayYMD}: nothing to delete.`);
+    return;
+  }
+
+  console.log(`[ip-list-expirer] ${todayYMD}: deleting ${expired.length} expired item(s)`);
+
+  await deleteItemsById(env, expired.map(x => x.id));
+
+  console.log(`[ip-list-expirer] ${todayYMD}: deletion complete.`);
+}
