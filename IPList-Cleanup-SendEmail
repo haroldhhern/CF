@@ -1,0 +1,249 @@
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/run") {
+      const key = request.headers.get("x-run-key");
+      if (!key || key !== env.RUN_KEY) return new Response("Forbidden", { status: 403 });
+
+      ctx.waitUntil(run(env));
+      return new Response("OK: triggered cleanup", { status: 200 });
+    }
+
+    return new Response("OK: cron worker deployed", { status: 200 });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(run(env));
+  },
+};
+
+/** =========================
+ *  Date helpers (New York)
+ *  ========================= */
+
+function ymdInNY(offsetDays = 0) {
+  const dt = new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000);
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(dt);
+
+  const y = parts.find((p) => p.type === "year")?.value;
+  const m = parts.find((p) => p.type === "month")?.value;
+  const d = parts.find((p) => p.type === "day")?.value;
+  if (!y || !m || !d) throw new Error("Failed to compute NY date parts");
+  return `${y}-${m}-${d}`; // YYYY-MM-DD
+}
+
+function mmddyyyyToYMD(mmddyyyy) {
+  const mm = mmddyyyy.slice(0, 2);
+  const dd = mmddyyyy.slice(3, 5);
+  const yyyy = mmddyyyy.slice(6, 10);
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/** =========================
+ *  Comment parsing (MM/DD/YYYY)
+ *  ========================= */
+
+function extractRemoveDateMMDDYYYY(comment) {
+  const text = (comment || "").toString();
+  const m = text.match(/ticket\s*\d+\s*-\s*remove\s+(\d{2}\/\d{2}\/\d{4})/i);
+  return m ? m[1] : null; // MM/DD/YYYY
+}
+
+/** =========================
+ *  Cloudflare Lists API
+ *  ========================= */
+
+async function listAllItems(env) {
+  const all = [];
+  let cursor;
+
+  while (true) {
+    const url = new URL(
+      `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/rules/lists/${env.CF_LIST_ID}/items`
+    );
+    url.searchParams.set("per_page", "500");
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const res = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${env.CF_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const data = await res.json();
+    if (!data?.success) throw new Error(`List items fetch failed: ${JSON.stringify(data?.errors || data)}`);
+
+    all.push(...(data.result || []));
+
+    cursor = data.result_info?.cursors?.after;
+    if (!cursor) break;
+  }
+
+  return all;
+}
+
+async function deleteItemsById(env, ids) {
+  const chunkSize = 200;
+
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const chunk = ids.slice(i, i + chunkSize);
+
+    const url = `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/rules/lists/${env.CF_LIST_ID}/items`;
+
+    const res = await fetch(url, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${env.CF_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ items: chunk.map((id) => ({ id })) }),
+    });
+
+    const data = await res.json();
+    if (!data?.success) throw new Error(`Delete failed: ${JSON.stringify(data?.errors || data)}`);
+  }
+}
+
+/** =========================
+ *  Email sending (Resend)
+ *  ========================= */
+
+async function sendEmail(env, subject, bodyText) {
+  const from = env.EMAIL_FROM || "Cloudflare Worker <onboarding@resend.dev>";
+  const to = env.ALERT_EMAIL;
+
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from,
+      to: [to],
+      subject,
+      text: bodyText,
+    }),
+  });
+
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Email send failed: ${res.status} ${t}`);
+  }
+}
+
+/** =========================
+ *  KV helpers (once/day emails)
+ *  ========================= */
+
+function dueTomorrowKvKey(env, tomorrowYMD) {
+  // Include list_id so multiple lists don’t collide if you reuse this worker
+  return `dueTomorrowSent:${tomorrowYMD}:${env.CF_LIST_ID}`;
+}
+
+async function alreadySentDueTomorrow(env, tomorrowYMD) {
+  if (!env.NOTIFY_KV) throw new Error("Missing KV binding: NOTIFY_KV");
+  const key = dueTomorrowKvKey(env, tomorrowYMD);
+  const v = await env.NOTIFY_KV.get(key);
+  return v === "1";
+}
+
+async function markSentDueTomorrow(env, tomorrowYMD) {
+  if (!env.NOTIFY_KV) throw new Error("Missing KV binding: NOTIFY_KV");
+  const key = dueTomorrowKvKey(env, tomorrowYMD);
+
+  // Keep it around for 2 days (172800 seconds) so retries don’t spam.
+  await env.NOTIFY_KV.put(key, "1", { expirationTtl: 172800 });
+}
+
+/** =========================
+ *  Main job logic
+ *  ========================= */
+
+async function run(env) {
+  for (const k of ["CF_ACCOUNT_ID", "CF_LIST_ID", "CF_API_TOKEN", "RESEND_API_KEY", "ALERT_EMAIL"]) {
+    if (!env[k]) throw new Error(`Missing env var/secret: ${k}`);
+  }
+  if (!env.NOTIFY_KV) throw new Error("Missing KV binding: NOTIFY_KV");
+
+  const todayYMD = ymdInNY(0);
+  const tomorrowYMD = ymdInNY(1);
+
+  const items = await listAllItems(env);
+
+  const dueTomorrow = [];
+  const expired = [];
+
+  for (const item of items) {
+    const comment = (item.comment || "").toString();
+    const removeMMDDYYYY = extractRemoveDateMMDDYYYY(comment);
+    if (!removeMMDDYYYY) continue;
+
+    const removeYMD = mmddyyyyToYMD(removeMMDDYYYY);
+
+    if (removeYMD === tomorrowYMD) {
+      dueTomorrow.push({
+        id: item.id,
+        ip: item.ip,
+        comment,
+        removeDate: removeMMDDYYYY,
+      });
+    }
+
+    if (removeYMD <= todayYMD) {
+      expired.push({
+        id: item.id,
+        ip: item.ip,
+        comment,
+        removeDate: removeMMDDYYYY,
+      });
+    }
+  }
+
+  // 1) Email day-before notice ONLY ONCE per day
+  if (dueTomorrow.length > 0) {
+    const sentAlready = await alreadySentDueTomorrow(env, tomorrowYMD);
+
+    if (!sentAlready) {
+      const subject = `Cloudflare IP List: entries scheduled for removal tomorrow (${tomorrowYMD})`;
+      const body =
+        `The following IP List entries are scheduled to be removed tomorrow (${tomorrowYMD}):\n\n` +
+        dueTomorrow
+          .map((x) => `• ${x.comment.replace(/\s+/g, " ").trim()} (IP: ${x.ip})`)
+          .join("\n") +
+        `\n\nList ID: ${env.CF_LIST_ID}\nWorker: ${env.WORKER_NAME || "ip-list-expirer"}\n`;
+
+      await sendEmail(env, subject, body);
+
+      // Mark as sent so future runs today won’t email again
+      await markSentDueTomorrow(env, tomorrowYMD);
+    }
+  }
+
+  // 2) Delete expired items
+  if (expired.length > 0) {
+    await deleteItemsById(env, expired.map((x) => x.id));
+
+    // 3) Email after deletion (this generally won’t repeat because the items are gone)
+    const subject = `Cloudflare IP List: entries deleted (${todayYMD})`;
+    const body =
+      `The following IP List entries were deleted on/after their scheduled date (today: ${todayYMD}):\n\n` +
+      expired
+        .map(
+          (x) =>
+            `• IP: ${x.ip}\n  Comment: ${x.comment.replace(/\s+/g, " ").trim()}\n  Scheduled Remove: ${x.removeDate}\n`
+        )
+        .join("\n") +
+      `\nList ID: ${env.CF_LIST_ID}\nWorker: ${env.WORKER_NAME || "ip-list-expirer"}\n`;
+
+    await sendEmail(env, subject, body);
+  }
+}
