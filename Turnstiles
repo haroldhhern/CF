@@ -1,0 +1,52 @@
+Step 1 — User loads the SPA
+Browser app.example.com→
+GET / (SPA loads)
+No Turnstile yet unless you intentionally want it on first load.
+Cloudflare SPA + API Protection Flow
+Page 2
+Step 2 — User starts a protected action
+
+The user clicks a protected action such as login, sign up, password reset, token request, or file upload.
+This is usually the right point to render Turnstile in an SPA.
+Step 3 — Turnstile runs in the SPA
+SPA UI on app.example.com renders Turnstile
+
+The browser completes the challenge and receives a token named cf-turnstile-response.
+Turnstile runs in the browser, not in WAF and not in the API.
+Step 4 — SPA sends the protected request to the API
+SPA api.example.com/api/auth/login→
+POST /api/auth/login
+
+The request includes the business data plus the Turnstile token.
+Step 5 — Cloudflare evaluates the API request first
+
+Before the request reaches origin, Cloudflare WAF and Bot Management evaluate hostname, path, bot score, verified bot status, and any rate-limiting logic.
+If the request is obviously malicious, Cloudflare blocks or challenges it before it reaches the API server.
+Step 6 — The API receives the request
+
+If Cloudflare allows the request through, the API origin receives both the request payload and the cf-turnstile-response token.
+Step 7 — The API verifies the Turnstile token
+API server Cloudflare Siteverify→
+
+The API sends the secret key and the token to the Siteverify endpoint.
+This validation is mandatory because tokens can be forged, expire after 5 minutes, and are single-use.
+Step 8 — The API decides success or failure
+
+If verification fails, return 400 or 403 and deny the protected action. If verification succeeds, continue the protected action and then create the application’s normal session or auth token.
+The Turnstile token itself is not your reusable session.
+Step 9 — Future API calls use normal app authentication
+
+After the protected action succeeds, the SPA uses your normal session cookie or application-issued auth token for subsequent API calls.
+Cloudflare SPA + API Protection Flow
+Page 3
+You do not normally re-send Turnstile on every API request.
+Recommended Cloudflare baseline rules
+These are baseline examples for an Enterprise Bot Management environment. Tune thresholds after reviewing real traffic in Security Analytics and Bot Analytics.
+Rule 1 — Block obvious bots on the API
+(http.host eq "api.example.com" and cf.bot_management.score le 10 and not cf.bot_management.verified_bot)
+Action: Block
+Rule 2 — Managed Challenge suspicious traffic on sensitive routes
+(http.host eq "api.example.com" and http.request.uri.path matches "^/api/(auth|token|login|password-reset|upload)" and cf.bot_management.score le 50 and not cf.bot_management.verified_bot)
+Action: Managed Challenge
+Rule 3 — Rate limit high-risk POST endpoints
+Create rate-limiting rules for POST requests to login, token issuance, password reset, and upload routes. Start conservatively, observe traffic, then tighten thresholds based on real usage patterns.
