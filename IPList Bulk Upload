@@ -1,0 +1,40 @@
+# ===== Configuration =====
+$ApiToken  = ""
+$AccountId = ""
+$ListId    = "Get it from the URL"
+$FilePath   = ""
+
+
+
+
+$headers = @{
+    Authorization = "Bearer $ApiToken"
+    "Content-Type" = "application/json"
+}
+
+# Read file and build list items
+$items = Get-Content $FilePath | ForEach-Object {
+    $parts = $_.Split(",",2)
+
+    if ($parts[0].Trim()) {
+        @{
+            ip = $parts[0].Trim()
+            comment = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
+        }
+    }
+}
+
+if (-not $items) {
+    throw "No valid IPs found in file."
+}
+
+# Upload
+$url = "https://api.cloudflare.com/client/v4/accounts/$AccountId/rules/lists/$ListId/items"
+
+$response = Invoke-RestMethod `
+    -Method POST `
+    -Uri $url `
+    -Headers $headers `
+    -Body ($items | ConvertTo-Json -Depth 5)
+
+$response | ConvertTo-Json -Depth 10
