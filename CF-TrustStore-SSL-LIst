@@ -1,0 +1,118 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$TokenCsvPath,
+
+    [string]$OutputCsvPath = ".\Cloudflare_TrustStore_Report.csv"
+)
+
+$BaseUrl = "https://api.cloudflare.com/client/v4"
+$Results = New-Object System.Collections.Generic.List[object]
+
+function Invoke-CFGet {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Headers
+    )
+
+    try {
+        $response = Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers -ErrorAction Stop
+        if (-not $response.success) {
+            $errors = if ($response.errors) {
+                ($response.errors | ConvertTo-Json -Compress)
+            } else {
+                "Unknown API error"
+            }
+            throw "Cloudflare API call failed: $errors"
+        }
+        return $response
+    }
+    catch {
+        throw $_
+    }
+}
+
+$TokenRows = Import-Csv -Path $TokenCsvPath
+
+foreach ($TokenRow in $TokenRows) {
+    $AccountLabel = $TokenRow.AccountLabel
+    $ApiToken     = $TokenRow.ApiToken
+
+    $Headers = @{
+        Authorization = "Bearer $ApiToken"
+        "Content-Type" = "application/json"
+    }
+
+    Write-Host "Processing token label: $AccountLabel"
+
+    try {
+        # List all zones visible to this token
+        $Page = 1
+        $PerPage = 50
+        $Zones = @()
+
+        do {
+            $ZonesUrl = "$BaseUrl/zones?page=$Page&per_page=$PerPage"
+            $ZonesResp = Invoke-CFGet -Uri $ZonesUrl -Headers $Headers
+
+            if ($ZonesResp.result) {
+                $Zones += $ZonesResp.result
+            }
+
+            $TotalPages = if ($ZonesResp.result_info.total_pages) {
+                [int]$ZonesResp.result_info.total_pages
+            } else {
+                1
+            }
+
+            $Page++
+        } while ($Page -le $TotalPages)
+
+        foreach ($Zone in $Zones) {
+            $ZoneName = $Zone.name
+            $ZoneId   = $Zone.id
+
+            # Prefer account name returned by the zone object.
+            $AccountName = if ($Zone.account -and $Zone.account.name) {
+                $Zone.account.name
+            } else {
+                $AccountLabel
+            }
+
+            try {
+                $TrustStoreUrl = "$BaseUrl/zones/$ZoneId/acm/custom_trust_store"
+                $TrustResp = Invoke-CFGet -Uri $TrustStoreUrl -Headers $Headers
+
+                if ($TrustResp.result -and $TrustResp.result.Count -gt 0) {
+                    foreach ($Cert in $TrustResp.result) {
+                        $Results.Add([PSCustomObject]@{
+                            AccountName              = $AccountName
+                            ZoneName                 = $ZoneName
+                            ZoneID                   = $ZoneId
+                            TrustStoreCertificateID  = $Cert.id
+                            Issuer                   = $Cert.issuer
+                            Subject                  = $Cert.subject
+                            ExpiresOn                = $Cert.expires_on
+                        })
+                    }
+                }
+            }
+            catch {
+                Write-Warning "Trust store query failed for zone '$ZoneName' ($ZoneId): $($_.Exception.Message)"
+            }
+        }
+    }
+    catch {
+        Write-Warning "Zone enumeration failed for token label '$AccountLabel': $($_.Exception.Message)"
+    }
+}
+
+$Final = $Results | Sort-Object AccountName, ZoneName, ExpiresOn
+
+$Final | Export-Csv -Path $OutputCsvPath -NoTypeInformation -Encoding UTF8
+$Final | Format-Table -AutoSize
+
+Write-Host ""
+Write-Host "Report saved to: $OutputCsvPath"
