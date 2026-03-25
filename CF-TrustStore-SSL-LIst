@@ -1,32 +1,38 @@
-param(
-    [Parameter(Mandatory = $true)]
-    [string]$TokenCsvPath,
 
-    [string]$OutputCsvPath = ".\Cloudflare_TrustStore_Report.csv"
+$ApiTokens = @(
+    @{
+        AccountLabel = "Account1"
+        ApiToken     = "PASTE_API_TOKEN_1_HERE"
+    },
+    @{
+        AccountLabel = "Account2"
+        ApiToken     = "PASTE_API_TOKEN_2_HERE"
+    }
 )
+
+$OutputCsvPath = ".\Cloudflare_TrustStore_Report.csv"
+
+# ============================
+# INTERNAL SETTINGS
+# ============================
 
 $BaseUrl = "https://api.cloudflare.com/client/v4"
 $Results = New-Object System.Collections.Generic.List[object]
 
 function Invoke-CFGet {
     param(
-        [Parameter(Mandatory = $true)]
         [string]$Uri,
-
-        [Parameter(Mandatory = $true)]
         [hashtable]$Headers
     )
 
     try {
         $response = Invoke-RestMethod -Method Get -Uri $Uri -Headers $Headers -ErrorAction Stop
+
         if (-not $response.success) {
-            $errors = if ($response.errors) {
-                ($response.errors | ConvertTo-Json -Compress)
-            } else {
-                "Unknown API error"
-            }
-            throw "Cloudflare API call failed: $errors"
+            $errors = ($response.errors | ConvertTo-Json -Compress)
+            throw "Cloudflare API error: $errors"
         }
+
         return $response
     }
     catch {
@@ -34,85 +40,97 @@ function Invoke-CFGet {
     }
 }
 
-$TokenRows = Import-Csv -Path $TokenCsvPath
+# ============================
+# MAIN LOGIC
+# ============================
 
-foreach ($TokenRow in $TokenRows) {
-    $AccountLabel = $TokenRow.AccountLabel
-    $ApiToken     = $TokenRow.ApiToken
+foreach ($tokenObj in $ApiTokens) {
+
+    $AccountLabel = $tokenObj.AccountLabel
+    $ApiToken     = $tokenObj.ApiToken
 
     $Headers = @{
         Authorization = "Bearer $ApiToken"
         "Content-Type" = "application/json"
     }
 
-    Write-Host "Processing token label: $AccountLabel"
+    Write-Host "`nProcessing account: $AccountLabel"
 
     try {
-        # List all zones visible to this token
-        $Page = 1
-        $PerPage = 50
-        $Zones = @()
+        # Get all zones (with pagination)
+        $page = 1
+        $perPage = 50
+        $zones = @()
 
         do {
-            $ZonesUrl = "$BaseUrl/zones?page=$Page&per_page=$PerPage"
-            $ZonesResp = Invoke-CFGet -Uri $ZonesUrl -Headers $Headers
+            $zonesUrl = "$BaseUrl/zones?page=$page&per_page=$perPage"
+            $zonesResp = Invoke-CFGet -Uri $zonesUrl -Headers $Headers
 
-            if ($ZonesResp.result) {
-                $Zones += $ZonesResp.result
+            if ($zonesResp.result) {
+                $zones += $zonesResp.result
             }
 
-            $TotalPages = if ($ZonesResp.result_info.total_pages) {
-                [int]$ZonesResp.result_info.total_pages
+            $totalPages = if ($zonesResp.result_info.total_pages) {
+                [int]$zonesResp.result_info.total_pages
             } else {
                 1
             }
 
-            $Page++
-        } while ($Page -le $TotalPages)
+            $page++
+        } while ($page -le $totalPages)
 
-        foreach ($Zone in $Zones) {
-            $ZoneName = $Zone.name
-            $ZoneId   = $Zone.id
+        Write-Host "  Found $($zones.Count) zones"
 
-            # Prefer account name returned by the zone object.
-            $AccountName = if ($Zone.account -and $Zone.account.name) {
-                $Zone.account.name
+        foreach ($zone in $zones) {
+            $zoneName = $zone.name
+            $zoneId   = $zone.id
+
+            # Use actual account name if available
+            $accountName = if ($zone.account -and $zone.account.name) {
+                $zone.account.name
             } else {
                 $AccountLabel
             }
 
             try {
-                $TrustStoreUrl = "$BaseUrl/zones/$ZoneId/acm/custom_trust_store"
-                $TrustResp = Invoke-CFGet -Uri $TrustStoreUrl -Headers $Headers
+                $trustUrl = "$BaseUrl/zones/$zoneId/acm/custom_trust_store"
+                $trustResp = Invoke-CFGet -Uri $trustUrl -Headers $Headers
 
-                if ($TrustResp.result -and $TrustResp.result.Count -gt 0) {
-                    foreach ($Cert in $TrustResp.result) {
+                if ($trustResp.result -and $trustResp.result.Count -gt 0) {
+
+                    foreach ($cert in $trustResp.result) {
                         $Results.Add([PSCustomObject]@{
-                            AccountName              = $AccountName
-                            ZoneName                 = $ZoneName
-                            ZoneID                   = $ZoneId
-                            TrustStoreCertificateID  = $Cert.id
-                            Issuer                   = $Cert.issuer
-                            Subject                  = $Cert.subject
-                            ExpiresOn                = $Cert.expires_on
+                            AccountName              = $accountName
+                            ZoneName                 = $zoneName
+                            ZoneID                   = $zoneId
+                            TrustStoreCertificateID  = $cert.id
+                            Issuer                   = $cert.issuer
+                            Subject                  = $cert.subject
+                            ExpiresOn                = $cert.expires_on
                         })
                     }
+
+                } else {
+                    Write-Host "    No trust store certs in zone: $zoneName"
                 }
             }
             catch {
-                Write-Warning "Trust store query failed for zone '$ZoneName' ($ZoneId): $($_.Exception.Message)"
+                Write-Warning "    Failed trust store for zone '$zoneName': $($_.Exception.Message)"
             }
         }
     }
     catch {
-        Write-Warning "Zone enumeration failed for token label '$AccountLabel': $($_.Exception.Message)"
+        Write-Warning "Failed processing account '$AccountLabel': $($_.Exception.Message)"
     }
 }
+
+# ============================
+# OUTPUT
+# ============================
 
 $Final = $Results | Sort-Object AccountName, ZoneName, ExpiresOn
 
 $Final | Export-Csv -Path $OutputCsvPath -NoTypeInformation -Encoding UTF8
 $Final | Format-Table -AutoSize
 
-Write-Host ""
-Write-Host "Report saved to: $OutputCsvPath"
+Write-Host "`nReport saved to: $OutputCsvPath"
