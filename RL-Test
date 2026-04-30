@@ -1,18 +1,44 @@
-$Url = "https://example.com/page1"
+# Test-RateLimit.ps1
 
-for ($i = 1; $i -le 25; $i++) {
+$Url = "https://example.com/login"
+
+# Number of login POSTs to send
+$Attempts = 12
+
+# Delay between attempts
+$DelaySeconds = 1
+
+# Replace these with your actual form field names
+$TextField    = "NAME HERE"
+
+$Text = "TEST"
+
+for ($i = 1; $i -le $Attempts; $i++) {
+
+    $Body = @{
+        $TextField    = $Text
+    }
+
     try {
-        $r = Invoke-WebRequest -Uri $Url `
+        $Response = Invoke-WebRequest `
+            -Uri $Url `
             -Method POST `
-            -Body "itemNumber=test" `
+            -Body $Body `
             -ContentType "application/x-www-form-urlencoded" `
-            -UseBasicParsing
+            -MaximumRedirection 0 `
+            -ErrorAction Stop
 
-        Write-Host "$i - $($r.StatusCode)"
+        Write-Host "Attempt $i - Status: $($Response.StatusCode)"
     }
     catch {
-        Write-Host "$i - $($_.Exception.Response.StatusCode.value__)"
+        if ($_.Exception.Response) {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+            Write-Host "Attempt $i - Status: $StatusCode"
+        }
+        else {
+            Write-Host "Attempt $i - Error: $($_.Exception.Message)"
+        }
     }
 
-    Start-Sleep -Milliseconds 200
+    Start-Sleep -Seconds $DelaySeconds
 }
