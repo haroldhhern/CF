@@ -1,45 +1,70 @@
-$BaseUrl   = "https://example.com"
+$BaseUrl    = "https://example.com"
 $CaptchaUrl = "$BaseUrl/"
 $LoginUrl   = "$BaseUrl/login"
 
 $Attempts = 10
 
-# Session (VERY IMPORTANT)
 $Session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 
 $Headers = @{
     "User-Agent" = "Mozilla/5.0"
 }
 
-# -------------------------
-# STEP 1: GET captcha page
-# -------------------------
+$DropdownFieldName = 'yourDropdownFieldName'
+$DropdownValue     = 'Yes'
+
+$CaptchaFieldName  = 'recaptcha'
+$CaptchaValue      = 'YOUR_STATIC_RECAPTCHA_VALUE'
+
+$EmailFieldName    = 'ct100$SiteContentPlaceHolder$txbEmal'
+$PasswordFieldName = 'ct100$SiteContentPlaceHolder$txbPassword'
+
+$EmailValue        = 'test@example.com'
+$PasswordValue     = 'WrongPassword123!'
+
+function Get-HiddenFields {
+    param($Page)
+
+    $Hidden = @{}
+
+    foreach ($FieldName in @("__VIEWSTATE", "__EVENTVALIDATION", "__VIEWSTATEGENERATOR")) {
+        $Value = ($Page.InputFields | Where-Object { $_.Name -eq $FieldName }).Value
+        if ($null -ne $Value) {
+            $Hidden[$FieldName] = $Value
+        }
+    }
+
+    return $Hidden
+}
+
+# STEP 1: Load initial page
 $Initial = Invoke-WebRequest `
     -Uri $CaptchaUrl `
     -Method GET `
     -WebSession $Session `
     -Headers $Headers
 
-# Extract ASP.NET hidden fields (if present)
-$ViewState        = ($Initial.InputFields | Where-Object { $_.Name -eq "__VIEWSTATE" }).Value
-$EventValidation  = ($Initial.InputFields | Where-Object { $_.Name -eq "__EVENTVALIDATION" }).Value
-$ViewStateGen     = ($Initial.InputFields | Where-Object { $_.Name -eq "__VIEWSTATEGENERATOR" }).Value
+# STEP 2: Submit dropdown first
+$DropdownBody = Get-HiddenFields -Page $Initial
+$DropdownBody[$DropdownFieldName] = $DropdownValue
 
-# -------------------------
-# STEP 2: Submit captcha + dropdown
-# -------------------------
-# Replace these with REAL field names from DevTools
-$CaptchaFieldName  = "recaptcha"
-$DropdownFieldName = "yourDropdownFieldName"
+$DropdownSubmit = Invoke-WebRequest `
+    -Uri $CaptchaUrl `
+    -Method POST `
+    -WebSession $Session `
+    -Headers $Headers `
+    -Body $DropdownBody `
+    -ContentType "application/x-www-form-urlencoded"
 
-$CaptchaBody = @{
-    "__VIEWSTATE"            = $ViewState
-    "__EVENTVALIDATION"      = $EventValidation
-    "__VIEWSTATEGENERATOR"   = $ViewStateGen
+Write-Host "Dropdown submit status: $($DropdownSubmit.StatusCode)"
+Write-Host "Dropdown final URL: $($DropdownSubmit.BaseResponse.ResponseUri.AbsoluteUri)"
 
-    $DropdownFieldName = "Yes"
-    $CaptchaFieldName  = "YOUR_STATIC_RECAPTCHA_VALUE"
-}
+Start-Sleep -Seconds 5
+
+# STEP 3: Submit reCAPTCHA after dropdown value loads
+$CaptchaBody = Get-HiddenFields -Page $DropdownSubmit
+$CaptchaBody[$DropdownFieldName] = $DropdownValue
+$CaptchaBody[$CaptchaFieldName]  = $CaptchaValue
 
 $CaptchaSubmit = Invoke-WebRequest `
     -Uri $CaptchaUrl `
@@ -50,10 +75,9 @@ $CaptchaSubmit = Invoke-WebRequest `
     -ContentType "application/x-www-form-urlencoded"
 
 Write-Host "Captcha submit status: $($CaptchaSubmit.StatusCode)"
+Write-Host "Captcha final URL: $($CaptchaSubmit.BaseResponse.ResponseUri.AbsoluteUri)"
 
-# -------------------------
-# STEP 3: Access login page
-# -------------------------
+# STEP 4: Load login page
 $LoginPage = Invoke-WebRequest `
     -Uri $LoginUrl `
     -Method GET `
@@ -61,28 +85,14 @@ $LoginPage = Invoke-WebRequest `
     -Headers $Headers
 
 Write-Host "Login page status: $($LoginPage.StatusCode)"
+Write-Host "Login page final URL: $($LoginPage.BaseResponse.ResponseUri.AbsoluteUri)"
 
-# Extract hidden fields again (login page has its own)
-$LoginViewState       = ($LoginPage.InputFields | Where-Object { $_.Name -eq "__VIEWSTATE" }).Value
-$LoginEventValidation = ($LoginPage.InputFields | Where-Object { $_.Name -eq "__EVENTVALIDATION" }).Value
-$LoginViewStateGen    = ($LoginPage.InputFields | Where-Object { $_.Name -eq "__VIEWSTATEGENERATOR" }).Value
-
-# -------------------------
-# STEP 4: Perform login attempts
-# -------------------------
-$EmailField    = "ct100`$SiteContentPlaceHolder`$txbEmal"
-$PasswordField = "ct100`$SiteContentPlaceHolder`$txbPassword"
-
+# STEP 5: Login attempts
 for ($i = 1; $i -le $Attempts; $i++) {
 
-    $LoginBody = @{
-        "__VIEWSTATE"            = $LoginViewState
-        "__EVENTVALIDATION"      = $LoginEventValidation
-        "__VIEWSTATEGENERATOR"   = $LoginViewStateGen
-
-        $EmailField    = "test@example.com"
-        $PasswordField = "WrongPassword123!"
-    }
+    $LoginBody = Get-HiddenFields -Page $LoginPage
+    $LoginBody[$EmailFieldName]    = $EmailValue
+    $LoginBody[$PasswordFieldName] = $PasswordValue
 
     try {
         $Response = Invoke-WebRequest `
@@ -98,8 +108,7 @@ for ($i = 1; $i -le $Attempts; $i++) {
     }
     catch {
         if ($_.Exception.Response) {
-            $StatusCode = [int]$_.Exception.Response.StatusCode
-            Write-Host "Login attempt $i - Status: $StatusCode"
+            Write-Host "Login attempt $i - Status: $([int]$_.Exception.Response.StatusCode)"
         }
         else {
             Write-Host "Login attempt $i - Error: $($_.Exception.Message)"
