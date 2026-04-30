@@ -1,0 +1,18 @@
+$Url = "https://example.com/page1"
+
+for ($i = 1; $i -le 25; $i++) {
+    try {
+        $r = Invoke-WebRequest -Uri $Url `
+            -Method POST `
+            -Body "itemNumber=test" `
+            -ContentType "application/x-www-form-urlencoded" `
+            -UseBasicParsing
+
+        Write-Host "$i - $($r.StatusCode)"
+    }
+    catch {
+        Write-Host "$i - $($_.Exception.Response.StatusCode.value__)"
+    }
+
+    Start-Sleep -Milliseconds 200
+}
