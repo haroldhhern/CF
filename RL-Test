@@ -10,11 +10,14 @@ $Headers = @{
     "User-Agent" = "Mozilla/5.0"
 }
 
+# Replace with exact values from DevTools → Network → Payload/Form Data
 $DropdownFieldName = 'yourDropdownFieldName'
 $DropdownValue     = 'Yes'
 
 $CaptchaFieldName  = 'recaptcha'
 $CaptchaValue      = 'YOUR_STATIC_RECAPTCHA_VALUE'
+
+$CaptchaImageButton = 'ct100$SiteContentPlaceHolder$imgCaptchaSubmit'
 
 $EmailFieldName    = 'ct100$SiteContentPlaceHolder$txbEmal'
 $PasswordFieldName = 'ct100$SiteContentPlaceHolder$txbPassword'
@@ -22,12 +25,20 @@ $PasswordFieldName = 'ct100$SiteContentPlaceHolder$txbPassword'
 $EmailValue        = 'test@example.com'
 $PasswordValue     = 'WrongPassword123!'
 
+$LoginImageButton  = 'ct100$SiteContentPlaceHolder$imgLogin'
+
 function Get-HiddenFields {
     param($Page)
 
     $Hidden = @{}
 
-    foreach ($FieldName in @("__VIEWSTATE", "__EVENTVALIDATION", "__VIEWSTATEGENERATOR")) {
+    foreach ($FieldName in @(
+        "__VIEWSTATE",
+        "__EVENTVALIDATION",
+        "__VIEWSTATEGENERATOR",
+        "__EVENTTARGET",
+        "__EVENTARGUMENT"
+    )) {
         $Value = ($Page.InputFields | Where-Object { $_.Name -eq $FieldName }).Value
         if ($null -ne $Value) {
             $Hidden[$FieldName] = $Value
@@ -44,7 +55,10 @@ $Initial = Invoke-WebRequest `
     -WebSession $Session `
     -Headers $Headers
 
-# STEP 2: Submit dropdown first
+Write-Host "Initial page status: $($Initial.StatusCode)"
+Write-Host "Initial final URL: $($Initial.BaseResponse.ResponseUri.AbsoluteUri)"
+
+# STEP 2: Submit/select dropdown first
 $DropdownBody = Get-HiddenFields -Page $Initial
 $DropdownBody[$DropdownFieldName] = $DropdownValue
 
@@ -61,10 +75,14 @@ Write-Host "Dropdown final URL: $($DropdownSubmit.BaseResponse.ResponseUri.Absol
 
 Start-Sleep -Seconds 5
 
-# STEP 3: Submit reCAPTCHA after dropdown value loads
+# STEP 3: Submit CAPTCHA value and click CAPTCHA image button
 $CaptchaBody = Get-HiddenFields -Page $DropdownSubmit
 $CaptchaBody[$DropdownFieldName] = $DropdownValue
 $CaptchaBody[$CaptchaFieldName]  = $CaptchaValue
+
+# Simulate image button click
+$CaptchaBody["$CaptchaImageButton.x"] = "12"
+$CaptchaBody["$CaptchaImageButton.y"] = "8"
 
 $CaptchaSubmit = Invoke-WebRequest `
     -Uri $CaptchaUrl `
@@ -87,12 +105,17 @@ $LoginPage = Invoke-WebRequest `
 Write-Host "Login page status: $($LoginPage.StatusCode)"
 Write-Host "Login page final URL: $($LoginPage.BaseResponse.ResponseUri.AbsoluteUri)"
 
-# STEP 5: Login attempts
+# STEP 5: Send repeated login attempts and click login image button
 for ($i = 1; $i -le $Attempts; $i++) {
 
     $LoginBody = Get-HiddenFields -Page $LoginPage
+
     $LoginBody[$EmailFieldName]    = $EmailValue
     $LoginBody[$PasswordFieldName] = $PasswordValue
+
+    # Simulate login image button click
+    $LoginBody["$LoginImageButton.x"] = "25"
+    $LoginBody["$LoginImageButton.y"] = "10"
 
     try {
         $Response = Invoke-WebRequest `
@@ -105,10 +128,12 @@ for ($i = 1; $i -le $Attempts; $i++) {
             -ErrorAction Stop
 
         Write-Host "Login attempt $i - Status: $($Response.StatusCode)"
+        Write-Host "Login attempt $i - Final URL: $($Response.BaseResponse.ResponseUri.AbsoluteUri)"
     }
     catch {
         if ($_.Exception.Response) {
-            Write-Host "Login attempt $i - Status: $([int]$_.Exception.Response.StatusCode)"
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+            Write-Host "Login attempt $i - Status: $StatusCode"
         }
         else {
             Write-Host "Login attempt $i - Error: $($_.Exception.Message)"
