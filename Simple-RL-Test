@@ -1,0 +1,31 @@
+# Test Cloudflare Rate Limiting on /login
+# This intentionally sends repeated GET requests to trigger the rule.
+
+$Url = "https://example.com/login"
+$TotalRequests = 25
+$DelayMilliseconds = 200
+
+for ($i = 1; $i -le $TotalRequests; $i++) {
+    try {
+        $Response = Invoke-WebRequest `
+            -Uri $Url `
+            -Method GET `
+            -UseBasicParsing `
+            -Headers @{
+                "User-Agent" = "RateLimit-Test-PowerShell"
+            }
+
+        Write-Host "Request $i - Status: $($Response.StatusCode)"
+    }
+    catch {
+        if ($_.Exception.Response) {
+            $StatusCode = [int]$_.Exception.Response.StatusCode
+            Write-Host "Request $i - Blocked/Failed - Status: $StatusCode"
+        }
+        else {
+            Write-Host "Request $i - Error: $($_.Exception.Message)"
+        }
+    }
+
+    Start-Sleep -Milliseconds $DelayMilliseconds
+}
