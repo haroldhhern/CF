@@ -1,23 +1,31 @@
-$BaseUrl    = "https://example.com"
-$CaptchaUrl = "$BaseUrl/"
-$LoginUrl   = "$BaseUrl/login"
+$BaseUrl  = "https://example.com"
+$GateUrl  = "$BaseUrl/"
+$LoginUrl = "$BaseUrl/login"
 
 $Attempts = 10
+$DelayBetweenLoginAttemptsSeconds = 1
 
 $Session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 
 $Headers = @{
     "User-Agent" = "Mozilla/5.0"
+    "Accept"     = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    "Origin"     = $BaseUrl
+    "Referer"    = $GateUrl
 }
 
-# Replace with exact values from DevTools → Network → Payload/Form Data
+# Replace with exact values from DevTools payload
 $DropdownFieldName = 'yourDropdownFieldName'
 $DropdownValue     = 'Yes'
 
 $CaptchaFieldName  = 'recaptcha'
 $CaptchaValue      = 'YOUR_STATIC_RECAPTCHA_VALUE'
 
-$CaptchaImageButton = 'ct100$SiteContentPlaceHolder$imgCaptchaSubmit'
+# Use exact value from DevTools if present
+$GateEventTarget   = 'yourGateEventTarget'
+
+# Use exact image button base name from DevTools if payload shows .x and .y
+$GateImageButton   = 'yourGateImageButtonName'
 
 $EmailFieldName    = 'ct100$SiteContentPlaceHolder$txbEmal'
 $PasswordFieldName = 'ct100$SiteContentPlaceHolder$txbPassword'
@@ -25,7 +33,11 @@ $PasswordFieldName = 'ct100$SiteContentPlaceHolder$txbPassword'
 $EmailValue        = 'test@example.com'
 $PasswordValue     = 'WrongPassword123!'
 
-$LoginImageButton  = 'ct100$SiteContentPlaceHolder$imgLogin'
+# Use exact value from DevTools if present
+$LoginEventTarget  = 'yourLoginEventTarget'
+
+# Use exact image button base name from DevTools if payload shows .x and .y
+$LoginImageButton  = 'yourLoginImageButtonName'
 
 function Get-HiddenFields {
     param($Page)
@@ -34,78 +46,128 @@ function Get-HiddenFields {
 
     foreach ($FieldName in @(
         "__VIEWSTATE",
-        "__EVENTVALIDATION",
         "__VIEWSTATEGENERATOR",
+        "__EVENTVALIDATION",
         "__EVENTTARGET",
-        "__EVENTARGUMENT"
+        "__EVENTARGUMENT",
+        "__VIEWSTATEENCRYPTED"
     )) {
         $Value = ($Page.InputFields | Where-Object { $_.Name -eq $FieldName }).Value
+
         if ($null -ne $Value) {
             $Hidden[$FieldName] = $Value
         }
     }
 
+    if (-not $Hidden.ContainsKey("__EVENTTARGET")) {
+        $Hidden["__EVENTTARGET"] = ""
+    }
+
+    if (-not $Hidden.ContainsKey("__EVENTARGUMENT")) {
+        $Hidden["__EVENTARGUMENT"] = ""
+    }
+
     return $Hidden
 }
 
-# STEP 1: Load initial page
-$Initial = Invoke-WebRequest `
-    -Uri $CaptchaUrl `
+function Show-Step {
+    param(
+        [string]$Label,
+        $Response
+    )
+
+    Write-Host ""
+    Write-Host "===== $Label ====="
+    Write-Host "Status: $($Response.StatusCode)"
+    Write-Host "Final URL: $($Response.BaseResponse.ResponseUri.AbsoluteUri)"
+
+    Write-Host "Cookies:"
+    $CookieUri = New-Object System.Uri("$BaseUrl/")
+    $Session.Cookies.GetCookies($CookieUri) |
+        Format-Table Name, Domain, Path
+}
+
+# STEP 1: GET initial gate page
+$GatePage = Invoke-WebRequest `
+    -Uri $GateUrl `
     -Method GET `
     -WebSession $Session `
     -Headers $Headers
 
-Write-Host "Initial page status: $($Initial.StatusCode)"
-Write-Host "Initial final URL: $($Initial.BaseResponse.ResponseUri.AbsoluteUri)"
+Show-Step -Label "Initial gate page" -Response $GatePage
 
-# STEP 2: Submit/select dropdown first
-$DropdownBody = Get-HiddenFields -Page $Initial
+# STEP 2: Select dropdown first
+$DropdownBody = Get-HiddenFields -Page $GatePage
 $DropdownBody[$DropdownFieldName] = $DropdownValue
 
+# If DevTools shows an event target for the dropdown, replace this value
+# Otherwise leave it blank
+# $DropdownBody["__EVENTTARGET"] = $DropdownFieldName
+# $DropdownBody["__EVENTARGUMENT"] = ""
+
+$Headers["Referer"] = $GateUrl
+
 $DropdownSubmit = Invoke-WebRequest `
-    -Uri $CaptchaUrl `
+    -Uri $GateUrl `
     -Method POST `
     -WebSession $Session `
     -Headers $Headers `
     -Body $DropdownBody `
     -ContentType "application/x-www-form-urlencoded"
 
-Write-Host "Dropdown submit status: $($DropdownSubmit.StatusCode)"
-Write-Host "Dropdown final URL: $($DropdownSubmit.BaseResponse.ResponseUri.AbsoluteUri)"
+Show-Step -Label "Dropdown submit" -Response $DropdownSubmit
 
+# STEP 3: Wait for application-side dropdown load behavior
 Start-Sleep -Seconds 5
 
-# STEP 3: Submit CAPTCHA value and click CAPTCHA image button
-$CaptchaBody = Get-HiddenFields -Page $DropdownSubmit
-$CaptchaBody[$DropdownFieldName] = $DropdownValue
-$CaptchaBody[$CaptchaFieldName]  = $CaptchaValue
+# STEP 4: Submit CAPTCHA and click gate image button
+$GateSubmitBody = Get-HiddenFields -Page $DropdownSubmit
+$GateSubmitBody[$DropdownFieldName] = $DropdownValue
+$GateSubmitBody[$CaptchaFieldName]  = $CaptchaValue
 
-# Simulate image button click
-$CaptchaBody["$CaptchaImageButton.x"] = "12"
-$CaptchaBody["$CaptchaImageButton.y"] = "8"
+# Only use this if DevTools shows __EVENTTARGET populated
+if ($GateEventTarget -ne 'yourGateEventTarget') {
+    $GateSubmitBody["__EVENTTARGET"] = $GateEventTarget
+    $GateSubmitBody["__EVENTARGUMENT"] = ""
+}
 
-$CaptchaSubmit = Invoke-WebRequest `
-    -Uri $CaptchaUrl `
+# Only use this if DevTools payload shows imageButton.x and imageButton.y
+if ($GateImageButton -ne 'yourGateImageButtonName') {
+    $GateSubmitBody["$GateImageButton.x"] = "12"
+    $GateSubmitBody["$GateImageButton.y"] = "8"
+}
+
+$GateSubmit = Invoke-WebRequest `
+    -Uri $GateUrl `
     -Method POST `
     -WebSession $Session `
     -Headers $Headers `
-    -Body $CaptchaBody `
+    -Body $GateSubmitBody `
     -ContentType "application/x-www-form-urlencoded"
 
-Write-Host "Captcha submit status: $($CaptchaSubmit.StatusCode)"
-Write-Host "Captcha final URL: $($CaptchaSubmit.BaseResponse.ResponseUri.AbsoluteUri)"
+Show-Step -Label "Captcha/image button submit" -Response $GateSubmit
 
-# STEP 4: Load login page
+# STEP 5: GET login page after gate is passed
+$Headers["Referer"] = $GateUrl
+
 $LoginPage = Invoke-WebRequest `
     -Uri $LoginUrl `
     -Method GET `
     -WebSession $Session `
     -Headers $Headers
 
-Write-Host "Login page status: $($LoginPage.StatusCode)"
-Write-Host "Login page final URL: $($LoginPage.BaseResponse.ResponseUri.AbsoluteUri)"
+Show-Step -Label "Login page GET" -Response $LoginPage
 
-# STEP 5: Send repeated login attempts and click login image button
+if ($LoginPage.BaseResponse.ResponseUri.AbsoluteUri -like "*sessiontimedout*" -or
+    $LoginPage.BaseResponse.ResponseUri.AbsoluteUri -like "*errorpage*") {
+    Write-Host ""
+    Write-Host "The gate flow was not accepted. Compare the gate POST payload with DevTools."
+    exit
+}
+
+# STEP 6: Submit repeated login attempts
+$Headers["Referer"] = $LoginUrl
+
 for ($i = 1; $i -le $Attempts; $i++) {
 
     $LoginBody = Get-HiddenFields -Page $LoginPage
@@ -113,9 +175,17 @@ for ($i = 1; $i -le $Attempts; $i++) {
     $LoginBody[$EmailFieldName]    = $EmailValue
     $LoginBody[$PasswordFieldName] = $PasswordValue
 
-    # Simulate login image button click
-    $LoginBody["$LoginImageButton.x"] = "25"
-    $LoginBody["$LoginImageButton.y"] = "10"
+    # Only use this if DevTools shows __EVENTTARGET populated
+    if ($LoginEventTarget -ne 'yourLoginEventTarget') {
+        $LoginBody["__EVENTTARGET"] = $LoginEventTarget
+        $LoginBody["__EVENTARGUMENT"] = ""
+    }
+
+    # Only use this if DevTools payload shows imageButton.x and imageButton.y
+    if ($LoginImageButton -ne 'yourLoginImageButtonName') {
+        $LoginBody["$LoginImageButton.x"] = "25"
+        $LoginBody["$LoginImageButton.y"] = "10"
+    }
 
     try {
         $Response = Invoke-WebRequest `
@@ -127,8 +197,7 @@ for ($i = 1; $i -le $Attempts; $i++) {
             -ContentType "application/x-www-form-urlencoded" `
             -ErrorAction Stop
 
-        Write-Host "Login attempt $i - Status: $($Response.StatusCode)"
-        Write-Host "Login attempt $i - Final URL: $($Response.BaseResponse.ResponseUri.AbsoluteUri)"
+        Write-Host "Login attempt $i - Status: $($Response.StatusCode) - Final URL: $($Response.BaseResponse.ResponseUri.AbsoluteUri)"
     }
     catch {
         if ($_.Exception.Response) {
@@ -139,4 +208,6 @@ for ($i = 1; $i -le $Attempts; $i++) {
             Write-Host "Login attempt $i - Error: $($_.Exception.Message)"
         }
     }
+
+    Start-Sleep -Seconds $DelayBetweenLoginAttemptsSeconds
 }
