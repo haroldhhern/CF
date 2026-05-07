@@ -1,0 +1,94 @@
+Hi Team,
+The application was recently onboarded to Cloudflare in Production, and API Shield has now been learning production API traffic for more than 72 hours.
+At this point, more than ten API endpoints have been manually configured in API Shield, and the majority now have Cloudflare-recommended rate limits based on observed traffic patterns.
+I am requesting approval to proceed with the next implementation phase: validating the recommended rate limits, deploying them in a controlled monitoring mode, tuning them based on production behavior, and then gradually moving selected endpoints into enforcement.
+We are not implementing JWT validation or mTLS at this time. This phase will focus specifically on API rate limiting and traffic behavior controls.
+The proposed rollout will be controlled and low risk:
+
+
+No immediate blocking will be enabled at the start.
+
+
+Each endpoint will be reviewed individually.
+
+
+Initial rules will be deployed in Log/monitoring mode where available.
+
+
+Thresholds will be tuned based on observed legitimate traffic.
+
+
+Enforcement will be applied gradually only after validation.
+
+
+Rollback will be available by disabling the rule or reverting it back to Log mode.
+
+
+Requested approval:
+Please approve moving forward with the controlled implementation of Cloudflare API Shield rate limiting protections for the production application.
+Regards,
+[Your Name]
+
+Step-by-step process after approval
+Step 1 — Document the current API Shield state
+Create a table with:
+EndpointHTTP methodCloudflare recommended rate limitCurrent traffic behaviorRisk levelProposed actionRollback plan
+Example:
+POST /api/loginRecommendation: 20 requests per minuteInitial action: LogFuture action: Managed Challenge or BlockRollback: Disable rule or return to Log
+Step 2 — Classify the endpoints
+Group endpoints by risk.
+High risk:Login, authentication, password reset, token, form submissionMedium risk:Search, user profile update, transactional APIsLow risk:Read-only APIs, status checks, low-impact endpoints
+Step 3 — Review each recommended rate limit
+Do not blindly accept every recommendation.
+Validate:
+Is the endpoint public or authenticated?Is it used by browsers, scripts, or mobile users?Does it have normal traffic bursts?Could many users come from the same NAT IP?Would blocking affect business workflows?
+Step 4 — Create rate limiting rules
+Go to:
+Cloudflare Dashboard → Security → WAF → Rate Limiting Rules
+Create endpoint-specific rules.
+Example expression:
+(http.host eq "api.example.com" and http.request.method eq "POST" and http.request.uri.path eq "/api/login")
+Step 5 — Use the recommended threshold as the starting point
+Example:
+Cloudflare recommendation: 20 requests per minuteInitial threshold: 20 requests per minuteAction: Log
+If the endpoint is sensitive, keep the threshold close to the recommendation.
+If the endpoint has known legitimate bursts, add a safety buffer.
+Step 6 — Select the counting characteristic
+Recommended default:
+IP with NAT support
+Use this instead of plain IP-only for most production rules because it reduces false positives for users behind corporate NAT, VPNs, mobile carriers, or shared public IPs.
+Use plain IP-only only when you intentionally want to rate limit the entire source IP as one client.
+Step 7 — Start in Log / monitoring mode
+Do not start with Block.
+Initial action:
+Log
+Where Log is not available, use the least disruptive option and validate carefully before enforcement.
+Step 8 — Monitor for 24–72 hours
+Review:
+Security → EventsAPI Shield analyticsRate limiting eventsOrigin logsApplication logs
+Look for:
+Legitimate users triggering limitsUnexpected high-volume clientsBot-like patternsBusiness workflow impactHTTP 429 responsesApplication errors
+Step 9 — Tune the thresholds
+Adjust each rule based on actual production behavior.
+Example:
+Recommended: 20 requests/minuteObserved legitimate burst: 28 requests/minuteUpdated threshold: 35 or 40 requests/minute
+Step 10 — Move to phased enforcement
+Recommended order:
+Phase 1: LogPhase 2: Managed Challenge, if appropriatePhase 3: Block, only for high-confidence abuse
+For API clients that cannot solve challenges, avoid Managed Challenge and consider Block only when the rule is highly accurate.
+Step 11 — Add narrow exceptions only when required
+Create exceptions only for trusted traffic such as:
+Known internal IP rangesKnown service accountsApproved automationSpecific partner integrations
+Avoid broad bypass rules.
+Step 12 — Document the final production configuration
+For every rule, document:
+EndpointMethodThresholdPeriodCounting characteristicActionException logicOwnerDate implementedRollback step
+Step 13 — Post-implementation monitoring
+Continue monitoring after enforcement.
+Track:
+Rate limit triggersFalse positivesBlocked requestsUser complaintsOrigin performanceAPI error ratesTraffic spikes
+Step 14 — Rollback process
+If legitimate traffic is impacted:
+1. Change action from Block/Challenge back to Log2. Increase threshold if needed3. Add a narrow exception if justified4. Re-monitor before re-enforcement
+Final recommended rollout:
+Review recommendationsDeploy in Log modeMonitorTuneGradually enforceDocumentContinue monitoring
