@@ -1,0 +1,83 @@
+# Cloudflare WAF Rules Exporter
+# Exports WAF rules into a readable table and CSV
+
+$ApiToken = "YOUR_CLOUDFLARE_API_TOKEN"
+$ZoneId   = "YOUR_ZONE_ID"
+
+$Headers = @{
+    "Authorization" = "Bearer $ApiToken"
+    "Content-Type"  = "application/json"
+}
+
+$Phases = @(
+    "http_request_firewall_custom",
+    "http_ratelimit",
+    "http_request_firewall_managed"
+)
+
+$AllRules = @()
+
+foreach ($Phase in $Phases) {
+
+    $Uri = "https://api.cloudflare.com/client/v4/zones/$ZoneId/rulesets/phases/$Phase/entrypoint"
+
+    try {
+        $Response = Invoke-RestMethod -Method GET -Uri $Uri -Headers $Headers
+
+        if ($Response.success -eq $true -and $Response.result.rules) {
+
+            $Order = 1
+
+            foreach ($Rule in $Response.result.rules) {
+
+                $RateLimitInfo = ""
+
+                if ($Rule.ratelimit) {
+                    $RateLimitInfo = "Period: $($Rule.ratelimit.period)s; Requests: $($Rule.ratelimit.requests_per_period); Mitigation Timeout: $($Rule.ratelimit.mitigation_timeout)s"
+                }
+
+                $Overrides = ""
+
+                if ($Rule.action_parameters.overrides) {
+                    $Overrides = ($Rule.action_parameters.overrides | ConvertTo-Json -Depth 10 -Compress)
+                }
+
+                $AllRules += [PSCustomObject]@{
+                    Order        = $Order
+                    Phase        = $Phase
+                    RuleName     = $Rule.description
+                    Enabled      = $Rule.enabled
+                    Action       = $Rule.action
+                    Expression   = $Rule.expression
+                    RateLimit    = $RateLimitInfo
+                    RulesetId    = $Response.result.id
+                    RuleId       = $Rule.id
+                    Version      = $Response.result.version
+                    LastUpdated  = $Response.result.last_updated
+                    Overrides    = $Overrides
+                }
+
+                $Order++
+            }
+        }
+        else {
+            Write-Host "No rules found for phase: $Phase" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "Could not retrieve phase: $Phase" -ForegroundColor Red
+        Write-Host $_.Exception.Message
+    }
+}
+
+# Human-friendly table view
+$AllRules |
+    Select-Object Order, Phase, RuleName, Enabled, Action, Expression, RateLimit |
+    Format-Table -Wrap -AutoSize
+
+# Export to CSV
+$CsvPath = ".\cloudflare-waf-rules-export.csv"
+$AllRules | Export-Csv -Path $CsvPath -NoTypeInformation -Encoding UTF8
+
+Write-Host ""
+Write-Host "Export completed: $CsvPath" -ForegroundColor Green
