@@ -1,0 +1,42 @@
+export default {
+  async fetch(request) {
+    const response = await fetch(request);
+
+    const newHeaders = new Headers(response.headers);
+    const cookies = response.headers.getSetCookie();
+
+    if (cookies.length > 0) {
+      newHeaders.delete("Set-Cookie");
+
+      for (const cookie of cookies) {
+        let rewrittenCookie = cookie
+          .replace(/;\s*Domain=domainB\.com/i, "; Domain=domainA.com")
+          .replace(/;\s*SameSite=None/i, "; SameSite=Lax");
+
+        if (!/;\s*Domain=/i.test(rewrittenCookie)) {
+          rewrittenCookie += "; Domain=domainA.com";
+        }
+
+        if (!/;\s*Secure/i.test(rewrittenCookie)) {
+          rewrittenCookie += "; Secure";
+        }
+
+        if (!/;\s*HttpOnly/i.test(rewrittenCookie)) {
+          rewrittenCookie += "; HttpOnly";
+        }
+
+        if (!/;\s*SameSite=/i.test(rewrittenCookie)) {
+          rewrittenCookie += "; SameSite=Lax";
+        }
+
+        newHeaders.append("Set-Cookie", rewrittenCookie);
+      }
+    }
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
+    });
+  }
+};
