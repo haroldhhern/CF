@@ -1,0 +1,113 @@
+export default {
+  async fetch(request, env, ctx) {
+    const UPSTREAM_ORIGIN = "https://api.domainC.com";
+    const UPSTREAM_BASE_PATH = "/api/path";
+
+    const BROWSER_COOKIE_DOMAIN = "domainA.com";
+    const BACKEND_COOKIE_DOMAIN = "domainB.com";
+
+    const incomingUrl = new URL(request.url);
+
+    // Build upstream URL
+    const upstreamUrl = new URL(UPSTREAM_ORIGIN);
+    upstreamUrl.pathname = UPSTREAM_BASE_PATH + incomingUrl.pathname;
+    upstreamUrl.search = incomingUrl.search;
+
+    // Copy request headers to upstream
+    const upstreamHeaders = new Headers(request.headers);
+
+    // Important: let fetch set the correct Host header for api.domainC.com
+    upstreamHeaders.delete("host");
+
+    const upstreamRequest = new Request(upstreamUrl.toString(), {
+      method: request.method,
+      headers: upstreamHeaders,
+      body: ["GET", "HEAD"].includes(request.method) ? null : request.body,
+      redirect: "manual"
+    });
+
+    const upstreamResponse = await fetch(upstreamRequest);
+
+    // Copy response headers
+    const responseHeaders = new Headers(upstreamResponse.headers);
+
+    // Remove original Set-Cookie before appending rewritten versions
+    responseHeaders.delete("set-cookie");
+
+    const setCookies = upstreamResponse.headers.getSetCookie();
+
+    for (const cookie of setCookies) {
+      const rewrittenCookie = rewriteCookieDomain(
+        cookie,
+        BACKEND_COOKIE_DOMAIN,
+        BROWSER_COOKIE_DOMAIN
+      );
+
+      responseHeaders.append("Set-Cookie", rewrittenCookie);
+    }
+
+    return new Response(upstreamResponse.body, {
+      status: upstreamResponse.status,
+      statusText: upstreamResponse.statusText,
+      headers: responseHeaders
+    });
+  }
+};
+
+function rewriteCookieDomain(cookie, oldDomain, newDomain) {
+  let rewritten = cookie;
+
+  // Replace Domain=domainB.com with Domain=domainA.com
+  const domainRegex = new RegExp(`;\\s*Domain=${escapeRegex(oldDomain)}`, "i");
+
+  if (domainRegex.test(rewritten)) {
+    rewritten = rewritten.replace(domainRegex, `; Domain=${newDomain}`);
+  } else {
+    // If backend does not send Domain, add it
+    rewritten += `; Domain=${newDomain}`;
+  }
+
+  // Normalize security attributes
+  rewritten = ensureAttribute(rewritten, "Path", "/");
+  rewritten = ensureFlag(rewritten, "Secure");
+  rewritten = ensureFlag(rewritten, "HttpOnly");
+
+  // Recommended for your design
+  rewritten = replaceOrAddAttribute(rewritten, "SameSite", "Lax");
+
+  return rewritten;
+}
+
+function ensureAttribute(cookie, name, value) {
+  const regex = new RegExp(`;\\s*${name}=`, "i");
+
+  if (regex.test(cookie)) {
+    return cookie;
+  }
+
+  return `${cookie}; ${name}=${value}`;
+}
+
+function ensureFlag(cookie, flag) {
+  const regex = new RegExp(`;\\s*${flag}(;|$)`, "i");
+
+  if (regex.test(cookie)) {
+    return cookie;
+  }
+
+  return `${cookie}; ${flag}`;
+}
+
+function replaceOrAddAttribute(cookie, name, value) {
+  const regex = new RegExp(`;\\s*${name}=[^;]*`, "i");
+
+  if (regex.test(cookie)) {
+    return cookie.replace(regex, `; ${name}=${value}`);
+  }
+
+  return `${cookie}; ${name}=${value}`;
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
