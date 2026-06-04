@@ -1,0 +1,27 @@
+# Target URL
+$Url = "https://yourwebsite.com"
+
+# Custom User-Agent to test blocking
+$UserAgent = "BadUserAgent-Test/1.0"
+
+try {
+    $Response = Invoke-WebRequest `
+        -Uri $Url `
+        -UserAgent $UserAgent `
+        -Method GET `
+        -MaximumRedirection 0 `
+        -ErrorAction Stop
+
+    Write-Host "Status Code: $($Response.StatusCode)"
+    Write-Host "Response Length: $($Response.Content.Length)"
+}
+catch {
+    if ($_.Exception.Response) {
+        Write-Host "Status Code: $([int]$_.Exception.Response.StatusCode)"
+        Write-Host "Status Description: $($_.Exception.Response.StatusDescription)"
+    }
+    else {
+        Write-Host "Request Failed:"
+        Write-Host $_.Exception.Message
+    }
+}
