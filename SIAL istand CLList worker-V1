@@ -70,14 +70,37 @@ export default {
       headers: originRequestHeaders
     });
 
-    if (BYPASS_CACHE_SVG_PATHS.has(url.pathname)) {
-      return fetch(originRequest, {
-        cf: {
-          cacheTtl: 0,
-          cacheEverything: false
-        }
-      });
+if (BYPASS_CACHE_SVG_PATHS.has(url.pathname)) {
+  const noCacheHeaders = new Headers(originRequest.headers);
+
+  noCacheHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+  noCacheHeaders.set("Pragma", "no-cache");
+  noCacheHeaders.set("Expires", "0");
+
+  const noCacheRequest = new Request(originRequest, {
+    headers: noCacheHeaders,
+    cf: {
+      cacheTtl: 0,
+      cacheEverything: false,
+      cacheKey: request.url + "-bypass-svg"
     }
+  });
+
+  const response = await fetch(noCacheRequest);
+
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  responseHeaders.set("Pragma", "no-cache");
+  responseHeaders.set("Expires", "0");
+  responseHeaders.set("Surrogate-Control", "no-store");
+  responseHeaders.set("X-SVG-Bypass-Worker", "true");
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders
+  });
+}
 
     return fetch(originRequest);
   }
