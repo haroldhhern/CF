@@ -1,0 +1,18 @@
+try {
+  $response = Invoke-WebRequest `
+    -Uri "https://api.ivv.opr.elguardia.net/v1" `
+    -Method OPTIONS `
+    -Headers @{
+      "Origin" = "https://ivv.opr.elguardia.net"
+      "Access-Control-Request-Method" = "POST"
+      "Access-Control-Request-Headers" = "content-type, authorization"
+    } `
+    -UseBasicParsing
+
+  $response.StatusCode
+  $response.Headers
+}
+catch {
+  $_.Exception.Response.StatusCode.value__
+  $_.Exception.Response.Headers
+}
