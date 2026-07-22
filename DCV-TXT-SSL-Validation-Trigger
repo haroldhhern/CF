@@ -1,0 +1,10 @@
+$Body = @{
+    validation_method = "txt"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+    -Method PATCH `
+    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/ssl/verification/$CertificateId" `
+    -Headers $Headers `
+    -ContentType "application/json" `
+    -Body $Body
