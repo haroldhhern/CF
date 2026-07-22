@@ -1,0 +1,19 @@
+$ZoneId = "YOUR_ZONE_ID"
+$ApiToken = "YOUR_API_TOKEN"
+$Hostname = "one.app.domain.com"
+
+$Headers = @{
+    Authorization = "Bearer $ApiToken"
+}
+
+$Response = Invoke-RestMethod `
+    -Method GET `
+    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/ssl/certificate_packs" `
+    -Headers $Headers
+
+$Certificate = $Response.result | Where-Object {
+    $_.hosts -contains $Hostname -and
+    $_.status -eq "pending_validation"
+}
+
+$Certificate | Select-Object id, status, validation_method, hosts
