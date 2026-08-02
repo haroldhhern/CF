@@ -8,3 +8,12 @@ Invoke-RestMethod `
     -Headers $Headers `
     -ContentType "application/json" `
     -Body $Body
+
+
+### CHECK STATUS ####
+Invoke-RestMethod `
+    -Method GET `
+    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/ssl/certificate_packs/$CertificateId" `
+    -Headers $Headers |
+    Select-Object -ExpandProperty result |
+    Select-Object id, status, validation_method, hosts
