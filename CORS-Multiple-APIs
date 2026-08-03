@@ -1,48 +1,64 @@
-const allowedOrigins = new Set([
-  "https://app.one.domain.com",
-  "https://app.two.api.com",
-  "https://app.three.domain.com",
-]);
+// Map each API hostname to the ONLY frontend origin allowed to call it.
+const allowedPairs = {
+  "api.app.one.domain.com": "https://app.one.domain.com",
+  "api.app.two.domain.com": "https://app.two.domain.com",
+  "api.app.three.domain.com": "https://app.three.domain.com",
+};
 
 export default {
   async fetch(request) {
+    const url = new URL(request.url);
+
+    const apiHost = url.hostname;
     const origin = request.headers.get("Origin");
-    const isAllowedOrigin = origin && allowedOrigins.has(origin);
 
-    const corsHeaders = {
-      "Access-Control-Allow-Methods":
-        "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, X-Turnstile-Token",
-      "Access-Control-Allow-Credentials": "true",
-      "Access-Control-Max-Age": "86400",
-    };
+    // Validate the Origin against the API hostname.
+    const allowedOrigin = allowedPairs[apiHost];
+    const isAllowed = origin === allowedOrigin;
 
-    if (isAllowedOrigin) {
+    const corsHeaders = {};
+
+    if (isAllowed) {
       corsHeaders["Access-Control-Allow-Origin"] = origin;
+      corsHeaders["Access-Control-Allow-Credentials"] = "true";
+      corsHeaders["Access-Control-Allow-Methods"] =
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS";
+      corsHeaders["Access-Control-Allow-Headers"] =
+        "Content-Type, Authorization, X-Turnstile-Token";
+      corsHeaders["Access-Control-Max-Age"] = "86400";
       corsHeaders["Vary"] = "Origin";
     }
 
+    //
+    // Handle CORS preflight
+    //
     if (request.method === "OPTIONS") {
-      if (!isAllowedOrigin) {
-        return new Response("Origin not allowed", { status: 403 });
+
+      if (!isAllowed) {
+        return new Response("Origin not allowed", {
+          status: 403
+        });
       }
 
       return new Response(null, {
         status: 204,
-        headers: corsHeaders,
+        headers: corsHeaders
       });
     }
 
+    //
+    // Forward request to origin
+    //
     const originResponse = await fetch(request);
+
     const response = new Response(originResponse.body, originResponse);
 
-    if (isAllowedOrigin) {
-      for (const [name, value] of Object.entries(corsHeaders)) {
-        response.headers.set(name, value);
-      }
+    if (isAllowed) {
+      Object.entries(corsHeaders).forEach(([k, v]) => {
+        response.headers.set(k, v);
+      });
     }
 
     return response;
-  },
-};
+  }
+}
