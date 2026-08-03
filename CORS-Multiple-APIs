@@ -1,0 +1,48 @@
+const allowedOrigins = new Set([
+  "https://app.one.domain.com",
+  "https://app.two.api.com",
+  "https://app.three.domain.com",
+]);
+
+export default {
+  async fetch(request) {
+    const origin = request.headers.get("Origin");
+    const isAllowedOrigin = origin && allowedOrigins.has(origin);
+
+    const corsHeaders = {
+      "Access-Control-Allow-Methods":
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers":
+        "Content-Type, Authorization, X-Turnstile-Token",
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Max-Age": "86400",
+    };
+
+    if (isAllowedOrigin) {
+      corsHeaders["Access-Control-Allow-Origin"] = origin;
+      corsHeaders["Vary"] = "Origin";
+    }
+
+    if (request.method === "OPTIONS") {
+      if (!isAllowedOrigin) {
+        return new Response("Origin not allowed", { status: 403 });
+      }
+
+      return new Response(null, {
+        status: 204,
+        headers: corsHeaders,
+      });
+    }
+
+    const originResponse = await fetch(request);
+    const response = new Response(originResponse.body, originResponse);
+
+    if (isAllowedOrigin) {
+      for (const [name, value] of Object.entries(corsHeaders)) {
+        response.headers.set(name, value);
+      }
+    }
+
+    return response;
+  },
+};
