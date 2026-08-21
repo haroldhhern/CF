@@ -16,49 +16,32 @@ export default {
     const allowedOrigin = allowedPairs[apiHost];
     const isAllowed = origin === allowedOrigin;
 
-    const corsHeaders = {};
-
-    if (isAllowed) {
-      corsHeaders["Access-Control-Allow-Origin"] = origin;
-      corsHeaders["Access-Control-Allow-Credentials"] = "true";
-      corsHeaders["Access-Control-Allow-Methods"] =
-        "GET, POST, PUT, PATCH, DELETE, OPTIONS";
-      corsHeaders["Access-Control-Allow-Headers"] =
-        "Content-Type, Authorization, X-Turnstile-Token";
-      corsHeaders["Access-Control-Max-Age"] = "86400";
-      corsHeaders["Vary"] = "Origin";
-    }
-
     //
-    // Handle CORS preflight
-    //
-    if (request.method === "OPTIONS") {
-
-      if (!isAllowed) {
-        return new Response("Origin not allowed", {
-          status: 403
-        });
-      }
-
-      return new Response(null, {
-        status: 204,
-        headers: corsHeaders
-      });
-    }
-
-    //
-    // Forward request to origin
+    // Forward ALL requests to the origin, including OPTIONS.
     //
     const originResponse = await fetch(request);
 
     const response = new Response(originResponse.body, originResponse);
 
+    //
+    // Add CORS headers only when the requesting frontend
+    // is the approved frontend for this API hostname.
+    //
     if (isAllowed) {
-      Object.entries(corsHeaders).forEach(([k, v]) => {
-        response.headers.set(k, v);
-      });
+      response.headers.set("Access-Control-Allow-Origin", origin);
+      response.headers.set("Access-Control-Allow-Credentials", "true");
+      response.headers.set(
+        "Access-Control-Allow-Methods",
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+      );
+      response.headers.set(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, X-Turnstile-Token"
+      );
+      response.headers.set("Access-Control-Max-Age", "86400");
+      response.headers.set("Vary", "Origin");
     }
 
     return response;
   }
-}
+};
