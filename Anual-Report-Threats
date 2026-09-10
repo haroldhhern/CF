@@ -1,47 +1,61 @@
-# =====================================================================
-# CLOUDFLARE APPLICATION SECURITY PROGRAM REPORT
-# Period: October 1, 2025 through today
+# ======================================================================
+# CLOUDFLARE APPLICATION SECURITY REPORT EXPORT
 #
-# Outputs:
-#   01-Executive-Summary.csv
-#   02-Monthly-Security-Summary.csv
-#   03-Top-Attacked-Hostnames.csv
-#   04-Top-Mitigation-Rules.csv
-#   05-Top-Mitigated-Countries.csv
-#   06-Top-Served-Countries.csv
-#   07-Zone-Inventory.csv
-#   08-Raw-Application-Security-Reports.json
+# Reporting period:
+#   October 1, 2025 through latest available Cloudflare monthly report
 #
-# Cloudflare API:
-#   GET /accounts/{account_id}/reporting/reports
-#   GET /accounts/{account_id}/reporting/reports/{report_id}
-#   GET /zones
-# =====================================================================
+# Requirements:
+#   PowerShell 5.1 or PowerShell 7+
+#   Cloudflare API Token
+#
+# Output:
+#   CloudflareSecurityReport\
+#       Executive-Summary.csv
+#       Monthly-Summary.csv
+#       Top-Attacked-Hostnames.csv
+#       Top-Mitigation-Rules.csv
+#       Top-Mitigated-Countries.csv
+#       Top-Served-Countries.csv
+#       Zone-Inventory.csv
+#       Report-Policies.json
+#       Raw-All-Reports.json
+#       Raw-Report-List.json
+# ======================================================================
 
 
-# ---------------------------------------------------------------------
-# CONFIGURATION
-# ---------------------------------------------------------------------
+# ======================================================================
+# CONFIGURATION - CHANGE THESE TWO VALUES
+# ======================================================================
 
 $AccountId = "YOUR_CLOUDFLARE_ACCOUNT_ID"
 $ApiToken  = "YOUR_CLOUDFLARE_API_TOKEN"
 
+
+# ======================================================================
+# REPORT PERIOD
+# ======================================================================
+
 $StartDate = [datetime]"2025-10-01T00:00:00Z"
 $EndDate   = (Get-Date).ToUniversalTime()
 
+
+# ======================================================================
+# GENERAL SETTINGS
+# ======================================================================
+
 $BaseUrl = "https://api.cloudflare.com/client/v4"
 
-$OutputFolder = ".\Cloudflare-Security-Program-Report"
+$OutputFolder = Join-Path $PWD "CloudflareSecurityReport"
 
 $Headers = @{
     Authorization = "Bearer $ApiToken"
-    "Content-Type" = "application/json"
+    Accept        = "application/json"
 }
 
 
-# ---------------------------------------------------------------------
+# ======================================================================
 # CREATE OUTPUT FOLDER
-# ---------------------------------------------------------------------
+# ======================================================================
 
 if (-not (Test-Path $OutputFolder)) {
 
@@ -52,15 +66,17 @@ if (-not (Test-Path $OutputFolder)) {
 }
 
 
-# ---------------------------------------------------------------------
-# HELPER FUNCTION
-# ---------------------------------------------------------------------
+# ======================================================================
+# CLOUDFLARE API FUNCTION
+# ======================================================================
 
-function Invoke-CloudflareApi {
+function Invoke-CloudflareGet {
 
     param (
-        [Parameter(Mandatory)]
-        [string]$Uri
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [switch]$DoNotStop
     )
 
     try {
@@ -71,57 +87,72 @@ function Invoke-CloudflareApi {
             -Headers $Headers `
             -ErrorAction Stop
 
-        if ($null -ne $Response.success -and -not $Response.success) {
+        if (
+            $null -ne $Response.success -and
+            $Response.success -eq $false
+        ) {
 
             Write-Host ""
             Write-Host "Cloudflare API returned an error:" -ForegroundColor Red
 
-            foreach ($ErrorItem in $Response.errors) {
-                Write-Host "  $($ErrorItem.code): $($ErrorItem.message)" -ForegroundColor Red
+            foreach ($ApiError in @($Response.errors)) {
+
+                if ($null -ne $ApiError) {
+
+                    Write-Host `
+                        "  Code $($ApiError.code): $($ApiError.message)" `
+                        -ForegroundColor Red
+                }
             }
 
             return $null
         }
 
         return $Response
-
     }
+
     catch {
 
         Write-Host ""
-        Write-Host "API request failed:" -ForegroundColor Red
-        Write-Host $Uri -ForegroundColor Yellow
+        Write-Host "Cloudflare request failed:" -ForegroundColor Red
+        Write-Host $Uri -ForegroundColor DarkYellow
         Write-Host $_.Exception.Message -ForegroundColor Red
+
+        if (-not $DoNotStop) {
+            throw
+        }
 
         return $null
     }
 }
 
 
-# ---------------------------------------------------------------------
-# HELPER: SAFE VALUE
-# ---------------------------------------------------------------------
+# ======================================================================
+# SAFE PROPERTY FUNCTION
+#
+# Returns $null when a property is absent instead of generating errors.
+# ======================================================================
 
-function Get-FirstProperty {
+function Get-PropertyValue {
 
     param (
         $Object,
-        [string[]]$PropertyNames
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names
     )
 
     if ($null -eq $Object) {
         return $null
     }
 
-    foreach ($PropertyName in $PropertyNames) {
+    foreach ($Name in $Names) {
 
-        if ($Object.PSObject.Properties.Name -contains $PropertyName) {
+        $Property = $Object.PSObject.Properties[$Name]
 
-            $Value = $Object.$PropertyName
+        if ($null -ne $Property) {
 
-            if ($null -ne $Value) {
-                return $Value
-            }
+            return $Property.Value
         }
     }
 
@@ -129,1022 +160,1112 @@ function Get-FirstProperty {
 }
 
 
-# =====================================================================
-# PART 1
-# TEST TOKEN
-# =====================================================================
+# ======================================================================
+# SAFE NUMBER FUNCTION
+# ======================================================================
 
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " CLOUDFLARE SECURITY PROGRAM REPORT" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host ""
+function Convert-ToLong {
 
-Write-Host "Testing Cloudflare API token..." -ForegroundColor Cyan
+    param (
+        $Value
+    )
 
-$TokenResponse = Invoke-CloudflareApi `
-    -Uri "$BaseUrl/user/tokens/verify"
-
-if ($null -eq $TokenResponse) {
-
-    Write-Host "Token validation failed. Stopping." -ForegroundColor Red
-    exit
-}
-
-Write-Host "API token is valid." -ForegroundColor Green
-
-
-# =====================================================================
-# PART 2
-# GET ZONES
-# =====================================================================
-
-Write-Host ""
-Write-Host "Retrieving Cloudflare zones..." -ForegroundColor Cyan
-
-$AllZones = @()
-
-$Page = 1
-$PerPage = 50
-
-do {
-
-    $ZoneUrl =
-        "$BaseUrl/zones?account.id=$AccountId&page=$Page&per_page=$PerPage"
-
-    $ZoneResponse = Invoke-CloudflareApi -Uri $ZoneUrl
-
-    if ($null -eq $ZoneResponse) {
-        break
+    if ($null -eq $Value) {
+        return [long]0
     }
 
-    $AllZones += $ZoneResponse.result
-
-    $TotalPages = $ZoneResponse.result_info.total_pages
-
-    if (-not $TotalPages) {
-        $TotalPages = 1
+    try {
+        return [long]$Value
     }
-
-    $Page++
-
-} while ($Page -le $TotalPages)
-
-
-Write-Host "Zones found: $($AllZones.Count)" -ForegroundColor Green
-
-
-# ---------------------------------------------------------------------
-# EXPORT ZONE INVENTORY
-# ---------------------------------------------------------------------
-
-$ZoneInventory = foreach ($Zone in $AllZones) {
-
-    [PSCustomObject]@{
-
-        ZoneName       = $Zone.name
-        ZoneId         = $Zone.id
-
-        Status         = $Zone.status
-        Type           = $Zone.type
-
-        Plan           = $Zone.plan.name
-
-        CreatedOn      = $Zone.created_on
-        ActivatedOn    = $Zone.activated_on
-        ModifiedOn     = $Zone.modified_on
-
-        Paused         = $Zone.paused
-
-        AccountName    = $Zone.account.name
-        AccountId      = $Zone.account.id
+    catch {
+        return [long]0
     }
 }
 
-$ZoneInventory |
-    Sort-Object ZoneName |
-    Export-Csv `
-        "$OutputFolder\07-Zone-Inventory.csv" `
-        -NoTypeInformation
+
+# ======================================================================
+# GET COUNT FROM CLOUDFLARE COUNT/PERCENTAGE OBJECT
+# ======================================================================
+
+function Get-MetricCount {
+
+    param (
+        $Metric
+    )
+
+    if ($null -eq $Metric) {
+        return [long]0
+    }
+
+    # If Cloudflare sends a raw number
+    if (
+        $Metric -is [int]  -or
+        $Metric -is [long] -or
+        $Metric -is [double]
+    ) {
+        return [long]$Metric
+    }
+
+    $Count = Get-PropertyValue `
+        -Object $Metric `
+        -Names @("count", "value")
+
+    return Convert-ToLong $Count
+}
 
 
-# =====================================================================
-# PART 3
-# GET ALL APPLICATION SECURITY REPORTS
-# =====================================================================
+# ======================================================================
+# GET PERCENTAGE
+# ======================================================================
+
+function Get-MetricPercentage {
+
+    param (
+        $Metric
+    )
+
+    if ($null -eq $Metric) {
+        return $null
+    }
+
+    return Get-PropertyValue `
+        -Object $Metric `
+        -Names @("percentage", "percent")
+}
+
+
+# ======================================================================
+# HEADER
+# ======================================================================
 
 Write-Host ""
-Write-Host "Retrieving Application Security Reports..." -ForegroundColor Cyan
+Write-Host "==========================================================" -ForegroundColor Cyan
+Write-Host " CLOUDFLARE APPLICATION SECURITY REPORT" -ForegroundColor Cyan
+Write-Host "==========================================================" -ForegroundColor Cyan
 
-$ReportsListResponse = Invoke-CloudflareApi `
-    -Uri "$BaseUrl/accounts/$AccountId/reporting/reports"
+Write-Host ""
+Write-Host "Requested period:"
+Write-Host "  October 1, 2025 through $($EndDate.ToString('MMMM d, yyyy'))"
+Write-Host ""
 
-if ($null -eq $ReportsListResponse) {
+
+# ======================================================================
+# 1. TEST ACCESS BY RETRIEVING REPORT LIST
+# ======================================================================
+
+Write-Host "[1/6] Retrieving Application Security Reports..." `
+    -ForegroundColor Cyan
+
+$ReportsUrl = "$BaseUrl/accounts/$AccountId/reporting/reports"
+
+$ReportListResponse = Invoke-CloudflareGet `
+    -Uri $ReportsUrl `
+    -DoNotStop
+
+
+if ($null -eq $ReportListResponse) {
 
     Write-Host ""
-    Write-Host "Unable to retrieve Application Security Reports." -ForegroundColor Red
+    Write-Host "FAILED TO ACCESS APPLICATION SECURITY REPORTS." `
+        -ForegroundColor Red
+
     Write-Host ""
-    Write-Host "Your account may not have access to the Security Reports API,"
-    Write-Host "or the API token may not have sufficient permissions."
-    exit
+    Write-Host "Check:"
+    Write-Host "  1. Account ID"
+    Write-Host "  2. API token"
+    Write-Host "  3. Application Security Reports access"
+    Write-Host "  4. Enterprise account eligibility"
+
+    Write-Host ""
+    exit 1
 }
 
-$ReportList = @($ReportsListResponse.result)
 
-Write-Host "Generated reports discovered: $($ReportList.Count)" -ForegroundColor Green
+# Save exactly what Cloudflare returned.
+
+$ReportListResponse |
+    ConvertTo-Json -Depth 30 |
+    Out-File `
+        (Join-Path $OutputFolder "Raw-Report-List.json") `
+        -Encoding utf8
 
 
-# =====================================================================
-# PART 4
-# RETRIEVE FULL DETAILS OF EACH REPORT
-# =====================================================================
+$ReportEntries = @()
 
-$DetailedReports = @()
+if ($null -ne $ReportListResponse.result) {
+    $ReportEntries = @($ReportListResponse.result)
+}
 
-foreach ($Report in $ReportList) {
 
-    $ReportId = Get-FirstProperty `
-        -Object $Report `
-        -PropertyNames @(
-            "id",
-            "report_id"
-        )
+Write-Host "      Reports found: $($ReportEntries.Count)" `
+    -ForegroundColor Green
 
-    if (-not $ReportId) {
 
-        Write-Warning "A report did not contain a report ID. Skipping."
+if ($ReportEntries.Count -eq 0) {
+
+    Write-Host ""
+    Write-Host "Cloudflare returned zero Application Security Reports." `
+        -ForegroundColor Yellow
+
+    Write-Host ""
+    Write-Host "Raw response was saved to:"
+    Write-Host (
+        Join-Path $OutputFolder "Raw-Report-List.json"
+    )
+
+    exit 0
+}
+
+
+# ======================================================================
+# 2. RETRIEVE EVERY REPORT
+# ======================================================================
+
+Write-Host ""
+Write-Host "[2/6] Downloading individual monthly reports..." `
+    -ForegroundColor Cyan
+
+
+$AllReports = New-Object System.Collections.ArrayList
+
+
+foreach ($ReportEntry in $ReportEntries) {
+
+    if ($null -eq $ReportEntry) {
         continue
     }
 
-    Write-Host "Retrieving report $ReportId ..." -ForegroundColor DarkGray
 
-    $ReportResponse = Invoke-CloudflareApi `
-        -Uri "$BaseUrl/accounts/$AccountId/reporting/reports/$ReportId"
+    $ReportId = Get-PropertyValue `
+        -Object $ReportEntry `
+        -Names @(
+            "id",
+            "report_id",
+            "reportId"
+        )
 
-    if ($null -ne $ReportResponse) {
 
-        $DetailedReports += $ReportResponse.result
+    if ([string]::IsNullOrWhiteSpace([string]$ReportId)) {
+
+        Write-Host `
+            "      Skipping entry with no report ID." `
+            -ForegroundColor Yellow
+
+        continue
+    }
+
+
+    Write-Host "      Report: $ReportId" -ForegroundColor DarkGray
+
+
+    $DetailUrl = "$BaseUrl/accounts/$AccountId/reporting/reports/$ReportId"
+
+
+    $DetailResponse = Invoke-CloudflareGet `
+        -Uri $DetailUrl `
+        -DoNotStop
+
+
+    if (
+        $null -ne $DetailResponse -and
+        $null -ne $DetailResponse.result
+    ) {
+
+        [void]$AllReports.Add($DetailResponse.result)
     }
 }
 
 
 Write-Host ""
-Write-Host "Detailed reports retrieved: $($DetailedReports.Count)" -ForegroundColor Green
+Write-Host "      Detailed reports downloaded: $($AllReports.Count)" `
+    -ForegroundColor Green
 
 
-# =====================================================================
-# PART 5
-# SAVE RAW REPORT DATA
-# =====================================================================
+# Save EVERYTHING returned by Cloudflare.
 
-$DetailedReports |
-    ConvertTo-Json -Depth 20 |
+$AllReports |
+    ConvertTo-Json -Depth 50 |
     Out-File `
-        "$OutputFolder\08-Raw-Application-Security-Reports.json" `
-        -Encoding UTF8
+        (Join-Path $OutputFolder "Raw-All-Reports.json") `
+        -Encoding utf8
 
 
-# =====================================================================
-# PART 6
-# FILTER OCTOBER 2025 THROUGH TODAY
-# =====================================================================
+if ($AllReports.Count -eq 0) {
 
-$FilteredReports = @()
+    Write-Host ""
+    Write-Host "No detailed reports could be downloaded." `
+        -ForegroundColor Red
 
-foreach ($Report in $DetailedReports) {
+    exit 1
+}
 
-    $TimeRange = Get-FirstProperty `
+
+# ======================================================================
+# 3. PROCESS REPORTS
+# ======================================================================
+
+Write-Host ""
+Write-Host "[3/6] Processing security metrics..." `
+    -ForegroundColor Cyan
+
+
+$MonthlySummary      = New-Object System.Collections.ArrayList
+$HostnameResults     = New-Object System.Collections.ArrayList
+$MitigationRules     = New-Object System.Collections.ArrayList
+$MitigatedCountries  = New-Object System.Collections.ArrayList
+$ServedCountries     = New-Object System.Collections.ArrayList
+
+
+foreach ($Report in $AllReports) {
+
+    if ($null -eq $Report) {
+        continue
+    }
+
+
+    # ------------------------------------------------------------------
+    # TIME RANGE
+    # ------------------------------------------------------------------
+
+    $TimeRange = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "time_range",
-            "timerange"
+            "timeRange"
         )
 
-    $ReportStart = $null
-    $ReportEnd   = $null
 
-    if ($TimeRange) {
+    $PeriodStartRaw = $null
+    $PeriodEndRaw   = $null
 
-        $ReportStart = Get-FirstProperty `
+
+    if ($null -ne $TimeRange) {
+
+        $PeriodStartRaw = Get-PropertyValue `
             -Object $TimeRange `
-            -PropertyNames @(
+            -Names @(
                 "start",
                 "start_time",
                 "from"
             )
 
-        $ReportEnd = Get-FirstProperty `
+
+        $PeriodEndRaw = Get-PropertyValue `
             -Object $TimeRange `
-            -PropertyNames @(
+            -Names @(
                 "end",
                 "end_time",
                 "to"
             )
     }
 
-    if (-not $ReportStart) {
 
-        $ReportStart = Get-FirstProperty `
+    # Additional fallback names
+
+    if ($null -eq $PeriodStartRaw) {
+
+        $PeriodStartRaw = Get-PropertyValue `
             -Object $Report `
-            -PropertyNames @(
+            -Names @(
                 "period_start",
                 "start_time",
                 "start"
             )
     }
 
-    if (-not $ReportEnd) {
 
-        $ReportEnd = Get-FirstProperty `
+    if ($null -eq $PeriodEndRaw) {
+
+        $PeriodEndRaw = Get-PropertyValue `
             -Object $Report `
-            -PropertyNames @(
+            -Names @(
                 "period_end",
                 "end_time",
                 "end"
             )
     }
 
-    if ($ReportStart) {
-
-        try {
-
-            $Start = [datetime]$ReportStart
-
-            if (($Start -ge $StartDate) -and ($Start -le $EndDate)) {
-
-                $FilteredReports += $Report
-            }
-        }
-        catch {
-
-            Write-Warning "Could not parse report start date: $ReportStart"
-        }
-    }
-}
-
-
-Write-Host ""
-Write-Host "Reports inside requested period: $($FilteredReports.Count)" -ForegroundColor Green
-
-
-# =====================================================================
-# ARRAYS FOR REPORT DATA
-# =====================================================================
-
-$MonthlySummary       = @()
-$HostnameResults      = @()
-$MitigationRules      = @()
-$MitigatedCountries   = @()
-$ServedCountries      = @()
-
-
-# =====================================================================
-# PART 7
-# PROCESS EACH REPORT
-# =====================================================================
-
-foreach ($Report in $FilteredReports) {
-
-
-    # -----------------------------------------------------------------
-    # REPORT ID
-    # -----------------------------------------------------------------
-
-    $ReportId = Get-FirstProperty `
-        -Object $Report `
-        -PropertyNames @(
-            "id",
-            "report_id"
-        )
-
-
-    # -----------------------------------------------------------------
-    # TIME RANGE
-    # -----------------------------------------------------------------
-
-    $TimeRange = Get-FirstProperty `
-        -Object $Report `
-        -PropertyNames @(
-            "time_range",
-            "timerange"
-        )
 
     $PeriodStart = $null
     $PeriodEnd   = $null
 
-    if ($TimeRange) {
 
-        $PeriodStart = Get-FirstProperty `
-            -Object $TimeRange `
-            -PropertyNames @(
-                "start",
-                "start_time",
-                "from"
-            )
+    if ($null -ne $PeriodStartRaw) {
 
-        $PeriodEnd = Get-FirstProperty `
-            -Object $TimeRange `
-            -PropertyNames @(
-                "end",
-                "end_time",
-                "to"
-            )
+        try {
+            $PeriodStart = [datetime]$PeriodStartRaw
+        }
+        catch {
+            $PeriodStart = $null
+        }
     }
 
 
-    # -----------------------------------------------------------------
-    # ACCOUNT INFORMATION
-    # -----------------------------------------------------------------
+    if ($null -ne $PeriodEndRaw) {
 
-    $AccountName = Get-FirstProperty `
+        try {
+            $PeriodEnd = [datetime]$PeriodEndRaw
+        }
+        catch {
+            $PeriodEnd = $null
+        }
+    }
+
+
+    # Ignore reports before October 2025.
+
+    if (
+        $null -ne $PeriodStart -and
+        $PeriodStart -lt $StartDate
+    ) {
+        continue
+    }
+
+
+    # ------------------------------------------------------------------
+    # ACCOUNT DATA
+    # ------------------------------------------------------------------
+
+    $ReportId = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
-            "account_name",
-            "accountName"
-        )
+        -Names @("id", "report_id", "reportId")
 
-    $Industry = Get-FirstProperty `
+
+    $AccountName = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
-            "account_industry",
-            "industry"
-        )
+        -Names @("account_name", "accountName")
 
 
-    # -----------------------------------------------------------------
-    # TOTAL ZONES
-    # -----------------------------------------------------------------
-
-    $TotalZones = Get-FirstProperty `
+    $AccountIndustry = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
-            "total_zones",
-            "totalZones"
-        )
+        -Names @("account_industry", "accountIndustry", "industry")
 
-    $ZonesAnalyzed = Get-FirstProperty `
+
+    $TotalZones = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @("total_zones", "totalZones")
+
+
+    $ZonesAnalyzed = Get-PropertyValue `
+        -Object $Report `
+        -Names @(
             "total_zones_analyzed",
-            "zones_analyzed",
-            "totalZonesAnalyzed"
+            "totalZonesAnalyzed",
+            "zones_analyzed"
         )
 
 
-    # -----------------------------------------------------------------
-    # INDUSTRY PERCENTILE
-    # -----------------------------------------------------------------
-
-    $IndustryPercentile = Get-FirstProperty `
+    $IndustryPercentile = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "industry_percentile",
             "industryPercentile"
         )
 
 
-    # -----------------------------------------------------------------
+    # ------------------------------------------------------------------
     # TOTAL REQUESTS
-    # -----------------------------------------------------------------
+    # ------------------------------------------------------------------
 
-    $TotalRequestsObject = Get-FirstProperty `
+    $TotalRequestsObject = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "total_requests",
             "totalRequests"
         )
 
-    $TotalRequests = 0
-    $TotalRequestsPercentage = $null
 
-    if ($TotalRequestsObject -is [ValueType]) {
-
-        $TotalRequests = $TotalRequestsObject
-    }
-    elseif ($TotalRequestsObject) {
-
-        $TotalRequests = Get-FirstProperty `
-            -Object $TotalRequestsObject `
-            -PropertyNames @(
-                "count",
-                "value"
-            )
-
-        $TotalRequestsPercentage = Get-FirstProperty `
-            -Object $TotalRequestsObject `
-            -PropertyNames @(
-                "percentage",
-                "percent"
-            )
-    }
+    $TotalRequests = Get-MetricCount `
+        -Metric $TotalRequestsObject
 
 
-    # -----------------------------------------------------------------
-    # MITIGATED REQUESTS
-    # -----------------------------------------------------------------
+    $TotalRequestPercentage = Get-MetricPercentage `
+        -Metric $TotalRequestsObject
 
-    $MitigatedObject = Get-FirstProperty `
+
+    # ------------------------------------------------------------------
+    # MITIGATED
+    # ------------------------------------------------------------------
+
+    $MitigatedObject = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "total_mitigated_requests",
-            "mitigated_requests",
-            "totalMitigatedRequests"
+            "totalMitigatedRequests",
+            "mitigated_requests"
         )
 
-    $MitigatedRequests = 0
-    $MitigatedPercentage = $null
 
-    if ($MitigatedObject -is [ValueType]) {
-
-        $MitigatedRequests = $MitigatedObject
-    }
-    elseif ($MitigatedObject) {
-
-        $MitigatedRequests = Get-FirstProperty `
-            -Object $MitigatedObject `
-            -PropertyNames @(
-                "count",
-                "value"
-            )
-
-        $MitigatedPercentage = Get-FirstProperty `
-            -Object $MitigatedObject `
-            -PropertyNames @(
-                "percentage",
-                "percent"
-            )
-    }
+    $MitigatedRequests = Get-MetricCount `
+        -Metric $MitigatedObject
 
 
-    # -----------------------------------------------------------------
-    # SERVED REQUESTS
-    # -----------------------------------------------------------------
+    $MitigatedPercentage = Get-MetricPercentage `
+        -Metric $MitigatedObject
 
-    $ServedObject = Get-FirstProperty `
+
+    # ------------------------------------------------------------------
+    # SERVED
+    # ------------------------------------------------------------------
+
+    $ServedObject = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "total_served_requests",
-            "served_requests",
-            "totalServedRequests"
+            "totalServedRequests",
+            "served_requests"
         )
 
-    $ServedRequests = 0
-    $ServedPercentage = $null
 
-    if ($ServedObject -is [ValueType]) {
-
-        $ServedRequests = $ServedObject
-    }
-    elseif ($ServedObject) {
-
-        $ServedRequests = Get-FirstProperty `
-            -Object $ServedObject `
-            -PropertyNames @(
-                "count",
-                "value"
-            )
-
-        $ServedPercentage = Get-FirstProperty `
-            -Object $ServedObject `
-            -PropertyNames @(
-                "percentage",
-                "percent"
-            )
-    }
+    $ServedRequests = Get-MetricCount `
+        -Metric $ServedObject
 
 
-    # -----------------------------------------------------------------
-    # MONTHLY SUMMARY ROW
-    # -----------------------------------------------------------------
+    $ServedPercentage = Get-MetricPercentage `
+        -Metric $ServedObject
 
-    $MonthlySummary += [PSCustomObject]@{
 
-        PeriodStart             = $PeriodStart
-        PeriodEnd               = $PeriodEnd
+    # ------------------------------------------------------------------
+    # MONTHLY SUMMARY
+    # ------------------------------------------------------------------
 
-        Account                 = $AccountName
-        Industry                = $Industry
+    $SummaryObject = [PSCustomObject]@{
 
-        TotalZones              = $TotalZones
-        ZonesAnalyzed           = $ZonesAnalyzed
+        PeriodStart            = $PeriodStart
+        PeriodEnd              = $PeriodEnd
 
-        TotalRequests           = [long]$TotalRequests
+        ReportId               = $ReportId
 
-        MitigatedRequests       = [long]$MitigatedRequests
-        MitigatedPercentage     = $MitigatedPercentage
+        AccountName            = $AccountName
+        AccountIndustry        = $AccountIndustry
 
-        ServedRequests          = [long]$ServedRequests
-        ServedPercentage        = $ServedPercentage
+        TotalZones             = $TotalZones
+        ZonesAnalyzed          = $ZonesAnalyzed
 
-        IndustryPercentile      = $IndustryPercentile
+        IndustryPercentile     = $IndustryPercentile
 
-        ReportId                = $ReportId
+        TotalRequests          = $TotalRequests
+        TotalRequestPercentage = $TotalRequestPercentage
+
+        MitigatedRequests      = $MitigatedRequests
+        MitigatedPercentage    = $MitigatedPercentage
+
+        ServedRequests         = $ServedRequests
+        ServedPercentage       = $ServedPercentage
     }
 
 
-    # =================================================================
+    [void]$MonthlySummary.Add($SummaryObject)
+
+
+    # ==================================================================
     # TOP ATTACKED HOSTNAMES
-    # =================================================================
+    # ==================================================================
 
-    $HostnameData = Get-FirstProperty `
+    $HostData = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "top_hostnames_by_mitigated_requests",
             "topHostnamesByMitigatedRequests"
         )
 
-    foreach ($HostItem in @($HostnameData)) {
 
-        $Hostname = Get-FirstProperty `
+    foreach ($HostItem in @($HostData)) {
+
+        if ($null -eq $HostItem) {
+            continue
+        }
+
+
+        $HostName = Get-PropertyValue `
             -Object $HostItem `
-            -PropertyNames @(
+            -Names @(
                 "hostname",
                 "host",
                 "name"
             )
 
-        $Count = Get-FirstProperty `
+
+        $HostCount = Get-PropertyValue `
             -Object $HostItem `
-            -PropertyNames @(
+            -Names @(
                 "count",
                 "requests",
                 "value"
             )
 
-        $HostnameResults += [PSCustomObject]@{
 
-            PeriodStart      = $PeriodStart
-            PeriodEnd        = $PeriodEnd
+        [void]$HostnameResults.Add(
 
-            Hostname         = $Hostname
+            [PSCustomObject]@{
 
-            MitigatedRequests = [long]$Count
-        }
+                PeriodStart       = $PeriodStart
+                PeriodEnd         = $PeriodEnd
+
+                Hostname          = $HostName
+                MitigatedRequests = Convert-ToLong $HostCount
+            }
+        )
     }
 
 
-    # =================================================================
+    # ==================================================================
     # TOP MITIGATION RULES
-    # =================================================================
+    # ==================================================================
 
-    $RulesData = Get-FirstProperty `
+    $RulesData = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "top_rules_by_mitigated_requests",
-            "top_mitigation_rules",
             "topRulesByMitigatedRequests"
         )
 
+
     foreach ($RuleItem in @($RulesData)) {
 
-        $RuleName = Get-FirstProperty `
+        if ($null -eq $RuleItem) {
+            continue
+        }
+
+
+        $RuleName = Get-PropertyValue `
             -Object $RuleItem `
-            -PropertyNames @(
+            -Names @(
                 "rule_name",
+                "ruleName",
                 "name"
             )
 
-        $RuleType = Get-FirstProperty `
+
+        $RuleType = Get-PropertyValue `
             -Object $RuleItem `
-            -PropertyNames @(
+            -Names @(
                 "rule_type",
+                "ruleType",
                 "type"
             )
 
-        $Count = Get-FirstProperty `
+
+        $RuleCount = Get-PropertyValue `
             -Object $RuleItem `
-            -PropertyNames @(
+            -Names @(
                 "count",
                 "requests",
                 "value"
             )
 
-        $MitigationRules += [PSCustomObject]@{
 
-            PeriodStart       = $PeriodStart
-            PeriodEnd         = $PeriodEnd
+        [void]$MitigationRules.Add(
 
-            RuleName          = $RuleName
-            RuleType          = $RuleType
+            [PSCustomObject]@{
 
-            MitigatedRequests = [long]$Count
-        }
+                PeriodStart       = $PeriodStart
+                PeriodEnd         = $PeriodEnd
+
+                RuleName          = $RuleName
+                RuleType          = $RuleType
+                MitigatedRequests = Convert-ToLong $RuleCount
+            }
+        )
     }
 
 
-    # =================================================================
-    # TOP COUNTRIES - MITIGATED
-    # =================================================================
+    # ==================================================================
+    # MITIGATED COUNTRIES
+    # ==================================================================
 
-    $MitigatedCountryData = Get-FirstProperty `
+    $MitigatedCountryData = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "top_source_countries_by_mitigated_requests",
             "topSourceCountriesByMitigatedRequests"
         )
 
+
     foreach ($CountryItem in @($MitigatedCountryData)) {
 
-        $Country = Get-FirstProperty `
+        if ($null -eq $CountryItem) {
+            continue
+        }
+
+
+        $CountryName = Get-PropertyValue `
             -Object $CountryItem `
-            -PropertyNames @(
+            -Names @(
                 "country",
                 "country_code",
+                "countryCode",
                 "name"
             )
 
-        $Count = Get-FirstProperty `
+
+        $CountryCount = Get-PropertyValue `
             -Object $CountryItem `
-            -PropertyNames @(
+            -Names @(
                 "count",
                 "requests",
                 "value"
             )
 
-        $MitigatedCountries += [PSCustomObject]@{
 
-            PeriodStart       = $PeriodStart
-            PeriodEnd         = $PeriodEnd
+        [void]$MitigatedCountries.Add(
 
-            Country           = $Country
+            [PSCustomObject]@{
 
-            MitigatedRequests = [long]$Count
-        }
+                PeriodStart       = $PeriodStart
+                PeriodEnd         = $PeriodEnd
+
+                Country           = $CountryName
+                MitigatedRequests = Convert-ToLong $CountryCount
+            }
+        )
     }
 
 
-    # =================================================================
-    # TOP COUNTRIES - SERVED
-    # =================================================================
+    # ==================================================================
+    # SERVED COUNTRIES
+    # ==================================================================
 
-    $ServedCountryData = Get-FirstProperty `
+    $ServedCountryData = Get-PropertyValue `
         -Object $Report `
-        -PropertyNames @(
+        -Names @(
             "top_source_countries_by_served_requests",
             "topSourceCountriesByServedRequests"
         )
 
+
     foreach ($CountryItem in @($ServedCountryData)) {
 
-        $Country = Get-FirstProperty `
+        if ($null -eq $CountryItem) {
+            continue
+        }
+
+
+        $CountryName = Get-PropertyValue `
             -Object $CountryItem `
-            -PropertyNames @(
+            -Names @(
                 "country",
                 "country_code",
+                "countryCode",
                 "name"
             )
 
-        $Count = Get-FirstProperty `
+
+        $CountryCount = Get-PropertyValue `
             -Object $CountryItem `
-            -PropertyNames @(
+            -Names @(
                 "count",
                 "requests",
                 "value"
             )
 
-        $ServedCountries += [PSCustomObject]@{
 
-            PeriodStart    = $PeriodStart
-            PeriodEnd      = $PeriodEnd
+        [void]$ServedCountries.Add(
 
-            Country        = $Country
+            [PSCustomObject]@{
 
-            ServedRequests = [long]$Count
-        }
+                PeriodStart    = $PeriodStart
+                PeriodEnd      = $PeriodEnd
+
+                Country        = $CountryName
+                ServedRequests = Convert-ToLong $CountryCount
+            }
+        )
     }
 }
 
 
-# =====================================================================
-# PART 8
-# EXPORT MONTHLY DATA
-# =====================================================================
+# ======================================================================
+# 4. EXPORT REPORT DATA
+# ======================================================================
 
-$MonthlySummary |
-    Sort-Object PeriodStart |
-    Export-Csv `
-        "$OutputFolder\02-Monthly-Security-Summary.csv" `
-        -NoTypeInformation
+Write-Host ""
+Write-Host "[4/6] Exporting CSV files..." -ForegroundColor Cyan
 
 
-$HostnameResults |
-    Sort-Object PeriodStart, MitigatedRequests -Descending |
-    Export-Csv `
-        "$OutputFolder\03-Top-Attacked-Hostnames.csv" `
-        -NoTypeInformation
+if ($MonthlySummary.Count -gt 0) {
 
-
-$MitigationRules |
-    Sort-Object PeriodStart, MitigatedRequests -Descending |
-    Export-Csv `
-        "$OutputFolder\04-Top-Mitigation-Rules.csv" `
-        -NoTypeInformation
-
-
-$MitigatedCountries |
-    Sort-Object PeriodStart, MitigatedRequests -Descending |
-    Export-Csv `
-        "$OutputFolder\05-Top-Mitigated-Countries.csv" `
-        -NoTypeInformation
-
-
-$ServedCountries |
-    Sort-Object PeriodStart, ServedRequests -Descending |
-    Export-Csv `
-        "$OutputFolder\06-Top-Served-Countries.csv" `
-        -NoTypeInformation
-
-
-# =====================================================================
-# PART 9
-# CALCULATE EXECUTIVE TOTALS
-# =====================================================================
-
-$TotalRequests = (
     $MonthlySummary |
-    Measure-Object `
-        -Property TotalRequests `
-        -Sum
-).Sum
+        Sort-Object PeriodStart |
+        Export-Csv `
+            (Join-Path $OutputFolder "Monthly-Summary.csv") `
+            -NoTypeInformation
+}
 
 
-$TotalMitigated = (
-    $MonthlySummary |
-    Measure-Object `
-        -Property MitigatedRequests `
-        -Sum
-).Sum
+if ($HostnameResults.Count -gt 0) {
+
+    $HostnameResults |
+        Sort-Object PeriodStart, MitigatedRequests -Descending |
+        Export-Csv `
+            (Join-Path $OutputFolder "Top-Attacked-Hostnames.csv") `
+            -NoTypeInformation
+}
 
 
-$TotalServed = (
-    $MonthlySummary |
-    Measure-Object `
-        -Property ServedRequests `
-        -Sum
-).Sum
+if ($MitigationRules.Count -gt 0) {
+
+    $MitigationRules |
+        Sort-Object PeriodStart, MitigatedRequests -Descending |
+        Export-Csv `
+            (Join-Path $OutputFolder "Top-Mitigation-Rules.csv") `
+            -NoTypeInformation
+}
+
+
+if ($MitigatedCountries.Count -gt 0) {
+
+    $MitigatedCountries |
+        Sort-Object PeriodStart, MitigatedRequests -Descending |
+        Export-Csv `
+            (Join-Path $OutputFolder "Top-Mitigated-Countries.csv") `
+            -NoTypeInformation
+}
+
+
+if ($ServedCountries.Count -gt 0) {
+
+    $ServedCountries |
+        Sort-Object PeriodStart, ServedRequests -Descending |
+        Export-Csv `
+            (Join-Path $OutputFolder "Top-Served-Countries.csv") `
+            -NoTypeInformation
+}
+
+
+# ======================================================================
+# 5. RETRIEVE REPORT POLICIES
+# ======================================================================
+
+Write-Host ""
+Write-Host "[5/6] Retrieving reporting policies..." `
+    -ForegroundColor Cyan
+
+
+$PoliciesResponse = Invoke-CloudflareGet `
+    -Uri "$BaseUrl/accounts/$AccountId/reporting/policies" `
+    -DoNotStop
+
+
+if ($null -ne $PoliciesResponse) {
+
+    $PoliciesResponse |
+        ConvertTo-Json -Depth 30 |
+        Out-File `
+            (Join-Path $OutputFolder "Report-Policies.json") `
+            -Encoding utf8
+}
+
+
+# ======================================================================
+# 6. ZONE INVENTORY
+# ======================================================================
+
+Write-Host ""
+Write-Host "[6/6] Retrieving Cloudflare zone inventory..." `
+    -ForegroundColor Cyan
+
+
+$Zones = New-Object System.Collections.ArrayList
+
+$Page = 1
+
+
+do {
+
+    $ZoneUrl = `
+        "$BaseUrl/zones?account.id=$AccountId&page=$Page&per_page=50"
+
+
+    $ZoneResponse = Invoke-CloudflareGet `
+        -Uri $ZoneUrl `
+        -DoNotStop
+
+
+    if ($null -eq $ZoneResponse) {
+        break
+    }
+
+
+    foreach ($Zone in @($ZoneResponse.result)) {
+
+        if ($null -ne $Zone) {
+            [void]$Zones.Add($Zone)
+        }
+    }
+
+
+    $TotalPages = 1
+
+
+    if ($null -ne $ZoneResponse.result_info) {
+
+        $PageValue = Get-PropertyValue `
+            -Object $ZoneResponse.result_info `
+            -Names @("total_pages")
+
+
+        if ($null -ne $PageValue) {
+
+            try {
+                $TotalPages = [int]$PageValue
+            }
+            catch {
+                $TotalPages = 1
+            }
+        }
+    }
+
+
+    $Page++
+
+}
+while ($Page -le $TotalPages)
+
+
+$ZoneExport = New-Object System.Collections.ArrayList
+
+
+foreach ($Zone in $Zones) {
+
+    if ($null -eq $Zone) {
+        continue
+    }
+
+
+    $PlanName = $null
+    $ZoneAccountName = $null
+
+
+    if ($null -ne $Zone.plan) {
+        $PlanName = $Zone.plan.name
+    }
+
+
+    if ($null -ne $Zone.account) {
+        $ZoneAccountName = $Zone.account.name
+    }
+
+
+    [void]$ZoneExport.Add(
+
+        [PSCustomObject]@{
+
+            ZoneName      = $Zone.name
+            ZoneId        = $Zone.id
+
+            Status        = $Zone.status
+            Type          = $Zone.type
+
+            Plan          = $PlanName
+
+            CreatedOn     = $Zone.created_on
+            ActivatedOn   = $Zone.activated_on
+            ModifiedOn    = $Zone.modified_on
+
+            Paused        = $Zone.paused
+
+            AccountName   = $ZoneAccountName
+        }
+    )
+}
+
+
+if ($ZoneExport.Count -gt 0) {
+
+    $ZoneExport |
+        Sort-Object ZoneName |
+        Export-Csv `
+            (Join-Path $OutputFolder "Zone-Inventory.csv") `
+            -NoTypeInformation
+}
+
+
+# ======================================================================
+# TOTALS
+# ======================================================================
+
+$TotalRequests  = [long]0
+$TotalMitigated = [long]0
+$TotalServed    = [long]0
+
+
+if ($MonthlySummary.Count -gt 0) {
+
+    $Measurement = $MonthlySummary |
+        Measure-Object TotalRequests -Sum
+
+    if ($null -ne $Measurement.Sum) {
+        $TotalRequests = [long]$Measurement.Sum
+    }
+
+
+    $Measurement = $MonthlySummary |
+        Measure-Object MitigatedRequests -Sum
+
+    if ($null -ne $Measurement.Sum) {
+        $TotalMitigated = [long]$Measurement.Sum
+    }
+
+
+    $Measurement = $MonthlySummary |
+        Measure-Object ServedRequests -Sum
+
+    if ($null -ne $Measurement.Sum) {
+        $TotalServed = [long]$Measurement.Sum
+    }
+}
+
+
+$MitigationRate = 0
 
 
 if ($TotalRequests -gt 0) {
 
-    $OverallMitigationPercentage = [math]::Round(
+    $MitigationRate = [math]::Round(
         ($TotalMitigated / $TotalRequests) * 100,
         4
     )
-
-    $OverallServedPercentage = [math]::Round(
-        ($TotalServed / $TotalRequests) * 100,
-        4
-    )
-
-}
-else {
-
-    $OverallMitigationPercentage = 0
-    $OverallServedPercentage = 0
 }
 
 
-# ---------------------------------------------------------------------
-# AGGREGATE HOSTNAMES
-# ---------------------------------------------------------------------
+# ======================================================================
+# EXECUTIVE SUMMARY
+# ======================================================================
 
-$AggregatedHosts = $HostnameResults |
-    Group-Object Hostname |
-    ForEach-Object {
-
-        [PSCustomObject]@{
-
-            Hostname = $_.Name
-
-            MitigatedRequests = (
-                $_.Group |
-                Measure-Object `
-                    -Property MitigatedRequests `
-                    -Sum
-            ).Sum
-        }
-    } |
-    Sort-Object MitigatedRequests -Descending
+$Summary = New-Object System.Collections.ArrayList
 
 
-# ---------------------------------------------------------------------
-# AGGREGATE RULES
-# ---------------------------------------------------------------------
-
-$AggregatedRules = $MitigationRules |
-    Group-Object RuleName, RuleType |
-    ForEach-Object {
-
-        $First = $_.Group[0]
-
-        [PSCustomObject]@{
-
-            RuleName = $First.RuleName
-            RuleType = $First.RuleType
-
-            MitigatedRequests = (
-                $_.Group |
-                Measure-Object `
-                    -Property MitigatedRequests `
-                    -Sum
-            ).Sum
-        }
-    } |
-    Sort-Object MitigatedRequests -Descending
-
-
-# ---------------------------------------------------------------------
-# AGGREGATE COUNTRIES
-# ---------------------------------------------------------------------
-
-$AggregatedCountries = $MitigatedCountries |
-    Group-Object Country |
-    ForEach-Object {
-
-        [PSCustomObject]@{
-
-            Country = $_.Name
-
-            MitigatedRequests = (
-                $_.Group |
-                Measure-Object `
-                    -Property MitigatedRequests `
-                    -Sum
-            ).Sum
-        }
-    } |
-    Sort-Object MitigatedRequests -Descending
-
-
-# =====================================================================
-# PART 10
-# EXECUTIVE SUMMARY CSV
-# =====================================================================
-
-$ExecutiveSummary = @(
-
+[void]$Summary.Add(
     [PSCustomObject]@{
-        Metric = "Report Start"
-        Value  = $StartDate.ToString("yyyy-MM-dd")
-    }
-
-    [PSCustomObject]@{
-        Metric = "Report Through"
-        Value  = $EndDate.ToString("yyyy-MM-dd")
-    }
-
-    [PSCustomObject]@{
-        Metric = "Cloudflare Account"
-        Value  = $MonthlySummary[0].Account
-    }
-
-    [PSCustomObject]@{
-        Metric = "Cloudflare Zones"
-        Value  = $AllZones.Count
-    }
-
-    [PSCustomObject]@{
-        Metric = "Application Security Reports Processed"
-        Value  = $MonthlySummary.Count
-    }
-
-    [PSCustomObject]@{
-        Metric = "Total Requests"
-        Value  = $TotalRequests
-    }
-
-    [PSCustomObject]@{
-        Metric = "Total Mitigated Requests"
-        Value  = $TotalMitigated
-    }
-
-    [PSCustomObject]@{
-        Metric = "Mitigated Traffic Percentage"
-        Value  = "$OverallMitigationPercentage%"
-    }
-
-    [PSCustomObject]@{
-        Metric = "Total Served Requests"
-        Value  = $TotalServed
-    }
-
-    [PSCustomObject]@{
-        Metric = "Served Traffic Percentage"
-        Value  = "$OverallServedPercentage%"
-    }
-
-    [PSCustomObject]@{
-        Metric = "Top Targeted Hostname"
-        Value  = $AggregatedHosts[0].Hostname
-    }
-
-    [PSCustomObject]@{
-        Metric = "Top Targeted Hostname Mitigated Requests"
-        Value  = $AggregatedHosts[0].MitigatedRequests
-    }
-
-    [PSCustomObject]@{
-        Metric = "Top Attack Source Country"
-        Value  = $AggregatedCountries[0].Country
-    }
-
-    [PSCustomObject]@{
-        Metric = "Top Attack Source Country Mitigated Requests"
-        Value  = $AggregatedCountries[0].MitigatedRequests
-    }
-
-    [PSCustomObject]@{
-        Metric = "Most Effective Mitigation Rule"
-        Value  = $AggregatedRules[0].RuleName
-    }
-
-    [PSCustomObject]@{
-        Metric = "Most Effective Mitigation Rule Type"
-        Value  = $AggregatedRules[0].RuleType
-    }
-
-    [PSCustomObject]@{
-        Metric = "Most Effective Rule Mitigated Requests"
-        Value  = $AggregatedRules[0].MitigatedRequests
+        Metric = "Requested Start Date"
+        Value  = "2025-10-01"
     }
 )
 
 
-$ExecutiveSummary |
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Report Generated"
+        Value  = $EndDate.ToString("yyyy-MM-dd")
+    }
+)
+
+
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Application Security Reports Processed"
+        Value  = $MonthlySummary.Count
+    }
+)
+
+
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Cloudflare Zones"
+        Value  = $Zones.Count
+    }
+)
+
+
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Total Requests"
+        Value  = $TotalRequests
+    }
+)
+
+
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Total Mitigated Requests"
+        Value  = $TotalMitigated
+    }
+)
+
+
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Mitigation Rate"
+        Value  = "$MitigationRate%"
+    }
+)
+
+
+[void]$Summary.Add(
+    [PSCustomObject]@{
+        Metric = "Total Served Requests"
+        Value  = $TotalServed
+    }
+)
+
+
+$Summary |
     Export-Csv `
-        "$OutputFolder\01-Executive-Summary.csv" `
+        (Join-Path $OutputFolder "Executive-Summary.csv") `
         -NoTypeInformation
 
 
-# =====================================================================
-# PART 11
-# DISPLAY RESULTS
-# =====================================================================
+# ======================================================================
+# SCREEN OUTPUT
+# ======================================================================
 
 Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " CLOUDFLARE SECURITY PROGRAM - EXECUTIVE SUMMARY" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-
-Write-Host ""
-Write-Host "Reporting period:"
-Write-Host "  $($StartDate.ToString('yyyy-MM-dd')) through $($EndDate.ToString('yyyy-MM-dd'))"
-
-Write-Host ""
-Write-Host "Cloudflare zones:" -NoNewline
-Write-Host " $($AllZones.Count)" -ForegroundColor Green
-
-Write-Host "Monthly security reports:" -NoNewline
-Write-Host " $($MonthlySummary.Count)" -ForegroundColor Green
+Write-Host "==========================================================" -ForegroundColor Green
+Write-Host " REPORT COMPLETED" -ForegroundColor Green
+Write-Host "==========================================================" -ForegroundColor Green
 
 Write-Host ""
 
-Write-Host "Total requests:" -NoNewline
-Write-Host " $([string]::Format('{0:N0}', $TotalRequests))" -ForegroundColor Green
+Write-Host "Application Security reports processed : " `
+    -NoNewline
 
-Write-Host "Mitigated requests:" -NoNewline
-Write-Host " $([string]::Format('{0:N0}', $TotalMitigated))" -ForegroundColor Green
+Write-Host $MonthlySummary.Count -ForegroundColor Green
 
-Write-Host "Mitigated percentage:" -NoNewline
-Write-Host " $OverallMitigationPercentage%" -ForegroundColor Green
 
-Write-Host "Served requests:" -NoNewline
-Write-Host " $([string]::Format('{0:N0}', $TotalServed))" -ForegroundColor Green
+Write-Host "Cloudflare zones                       : " `
+    -NoNewline
+
+Write-Host $Zones.Count -ForegroundColor Green
+
+
+Write-Host "Total requests                         : " `
+    -NoNewline
+
+Write-Host $TotalRequests.ToString("N0") -ForegroundColor Green
+
+
+Write-Host "Mitigated requests                     : " `
+    -NoNewline
+
+Write-Host $TotalMitigated.ToString("N0") -ForegroundColor Green
+
+
+Write-Host "Mitigation rate                        : " `
+    -NoNewline
+
+Write-Host "$MitigationRate%" -ForegroundColor Green
+
+
+Write-Host "Served requests                        : " `
+    -NoNewline
+
+Write-Host $TotalServed.ToString("N0") -ForegroundColor Green
 
 
 Write-Host ""
-Write-Host "TOP TARGETED HOSTNAMES" -ForegroundColor Yellow
-
-$AggregatedHosts |
-    Select-Object -First 10 |
-    Format-Table -AutoSize
+Write-Host "OUTPUT:" -ForegroundColor Cyan
+Write-Host $OutputFolder
 
 
 Write-Host ""
-Write-Host "TOP MITIGATION RULES" -ForegroundColor Yellow
-
-$AggregatedRules |
-    Select-Object -First 10 |
-    Format-Table -AutoSize
+Write-Host "Files:" -ForegroundColor Cyan
 
 
-Write-Host ""
-Write-Host "TOP ATTACK SOURCE COUNTRIES" -ForegroundColor Yellow
-
-$AggregatedCountries |
-    Select-Object -First 10 |
-    Format-Table -AutoSize
-
-
-Write-Host ""
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " REPORT FILES CREATED" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-
-Get-ChildItem $OutputFolder |
+Get-ChildItem $OutputFolder -File |
     Select-Object Name, Length |
     Format-Table -AutoSize
 
+
 Write-Host ""
-Write-Host "Report complete." -ForegroundColor Green
-Write-Host "Output folder: $OutputFolder" -ForegroundColor Green
+Write-Host "Done." -ForegroundColor Green
