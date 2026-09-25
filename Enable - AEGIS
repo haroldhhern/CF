@@ -46,25 +46,208 @@ catch {
 #Enable AEGIS
 ###############################################################################
 
-$ZoneId = "YOUR_ZONE_ID"
-$PoolId = "YOUR_EGRESS_POOL_ID"
-$Token  = "YOUR_API_TOKEN"
+# ============================================================
+# Cloudflare - Enable Aegis / Dedicated CDN Egress IPs
+# ============================================================
+
+# ------------------------------------------------------------
+# CONFIGURATION - CHANGE THESE VALUES
+# ------------------------------------------------------------
+
+$ApiToken = "YOUR_API_TOKEN"
+$ZoneId   = "YOUR_ZONE_ID"
+$PoolId   = "YOUR_EGRESS_POOL_ID"
+
+
+# ------------------------------------------------------------
+# CLOUDFLARE API
+# ------------------------------------------------------------
+
+$BaseUrl = "https://api.cloudflare.com/client/v4"
 
 $Headers = @{
-    Authorization = "Bearer $Token"
-    "Content-Type" = "application/json"
+    "Authorization" = "Bearer $ApiToken"
+    "Content-Type"  = "application/json"
 }
 
+
+# ------------------------------------------------------------
+# STEP 1 - CHECK CURRENT AEGIS CONFIGURATION
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "Checking current Aegis configuration..."
+Write-Host ""
+
+$AegisUrl = "$BaseUrl/zones/$ZoneId/settings/aegis"
+
+try {
+
+    $Current = Invoke-RestMethod `
+        -Method GET `
+        -Uri $AegisUrl `
+        -Headers $Headers `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host "ERROR: Unable to retrieve Aegis configuration."
+    Write-Host $_.Exception.Message
+    exit 1
+}
+
+
+Write-Host "Current configuration:"
+Write-Host "----------------------"
+Write-Host "Setting ID : $($Current.result.id)"
+Write-Host "Editable   : $($Current.result.editable)"
+
+if ($null -ne $Current.result.value) {
+
+    Write-Host "Enabled    : $($Current.result.value.enabled)"
+    Write-Host "Pool ID    : $($Current.result.value.pool_id)"
+
+}
+else {
+
+    Write-Host "Enabled    : Not configured"
+    Write-Host "Pool ID    : Not configured"
+
+}
+
+
+# ------------------------------------------------------------
+# STEP 2 - BUILD AEGIS CONFIGURATION
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "Enabling Aegis..."
+Write-Host ""
+
 $Body = @{
-    id = "aegis"
     value = @{
         enabled = $true
         pool_id = $PoolId
     }
 } | ConvertTo-Json -Depth 5
 
-Invoke-RestMethod `
-    -Method Patch `
-    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/settings/aegis" `
-    -Headers $Headers `
-    -Body $Body
+
+# ------------------------------------------------------------
+# STEP 3 - ENABLE AEGIS
+# ------------------------------------------------------------
+
+try {
+
+    $Result = Invoke-RestMethod `
+        -Method PATCH `
+        -Uri $AegisUrl `
+        -Headers $Headers `
+        -Body $Body `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host ""
+    Write-Host "ERROR: Failed to enable Aegis."
+    Write-Host $_.Exception.Message
+
+    # Display Cloudflare API error response
+    if ($_.Exception.Response) {
+
+        try {
+
+            $Reader = New-Object System.IO.StreamReader(
+                $_.Exception.Response.GetResponseStream()
+            )
+
+            $ErrorBody = $Reader.ReadToEnd()
+
+            Write-Host ""
+            Write-Host "Cloudflare response:"
+            Write-Host $ErrorBody
+
+        }
+        catch {
+        }
+    }
+
+    exit 1
+}
+
+
+# ------------------------------------------------------------
+# STEP 4 - DISPLAY API RESULT
+# ------------------------------------------------------------
+
+Write-Host ""
+
+if ($Result.success -eq $true) {
+
+    Write-Host "SUCCESS: Aegis configuration updated."
+
+}
+else {
+
+    Write-Host "ERROR: Cloudflare returned success=false."
+
+    $Result | ConvertTo-Json -Depth 10
+
+    exit 1
+}
+
+
+# ------------------------------------------------------------
+# STEP 5 - VERIFY CONFIGURATION
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "Verifying Aegis configuration..."
+Write-Host ""
+
+try {
+
+    $Verify = Invoke-RestMethod `
+        -Method GET `
+        -Uri $AegisUrl `
+        -Headers $Headers `
+        -ErrorAction Stop
+
+}
+catch {
+
+    Write-Host "ERROR: Unable to verify Aegis configuration."
+    Write-Host $_.Exception.Message
+    exit 1
+}
+
+
+# ------------------------------------------------------------
+# FINAL RESULT
+# ------------------------------------------------------------
+
+Write-Host "========================================"
+Write-Host " AEGIS / DEDICATED EGRESS CONFIGURATION"
+Write-Host "========================================"
+Write-Host ""
+
+Write-Host "Zone ID    : $ZoneId"
+Write-Host "Setting ID : $($Verify.result.id)"
+Write-Host "Editable   : $($Verify.result.editable)"
+
+if ($null -ne $Verify.result.value) {
+
+    Write-Host "Enabled    : $($Verify.result.value.enabled)"
+    Write-Host "Pool ID    : $($Verify.result.value.pool_id)"
+
+}
+else {
+
+    Write-Host "Enabled    : Unknown"
+    Write-Host "Pool ID    : Unknown"
+
+}
+
+Write-Host ""
+Write-Host "========================================"
