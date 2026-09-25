@@ -1,21 +1,39 @@
-#TEST TOKEN First
-$ZoneId = "YOUR_ZONE_ID"
+$AccountId = "YOUR_ACCOUNT_ID"
+$ZoneId    = "YOUR_ZONE_ID"
 
 $SecureToken = Read-Host "Cloudflare API token" -AsSecureString
 $Token = [System.Net.NetworkCredential]::new("", $SecureToken).Password
+$Headers = @{ Authorization = "Bearer $($Token.Trim())" }
 
-$Headers = @{
-    Authorization = "Bearer $($Token.Trim())"
+$Checks = [ordered]@{
+    Zone    = "zones/$ZoneId/addressing/regional_hostnames"
+    Account = "accounts/$AccountId/addressing/regional_hostnames/regions"
 }
 
-$Response = Invoke-RestMethod -Method Get `
-    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/addressing/regional_hostnames" `
-    -Headers $Headers `
-    -ErrorAction Stop
+foreach ($Check in $Checks.GetEnumerator()) {
+    Write-Host "`n--- $($Check.Key) request ---"
 
-$Response | ConvertTo-Json -Depth 10
+    try {
+        $Response = Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://api.cloudflare.com/client/v4/$($Check.Value)" `
+            -Headers $Headers -ErrorAction Stop
 
+        Write-Host "HTTP: $([int]$Response.StatusCode)"
+        Write-Host "Ray ID: $($Response.Headers['CF-Ray'])"
+        Write-Host "Body: $($Response.Content)"
+    }
+    catch {
+        $FailedResponse = $_.Exception.Response
 
+        if ($FailedResponse) {
+            Write-Host "HTTP: $([int]$FailedResponse.StatusCode)"
+            Write-Host "Ray ID: $($FailedResponse.Headers['CF-Ray'])"
+        }
+
+        Write-Host "Error: $($_.ErrorDetails.Message)"
+        Write-Host "Exception: $($_.Exception.Message)"
+    }
+}
 #####################################################################################################
 
 
