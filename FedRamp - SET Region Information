@@ -1,0 +1,104 @@
+# CHANGE SCRIPT — updates ONE existing regional hostname
+# only after you confirm the displayed change.
+
+$ErrorActionPreference = "Stop"
+
+$AccountId = "YOUR_ACCOUNT_ID"
+$ZoneId    = "YOUR_ZONE_ID"
+$Hostname  = "app.one.domain.com"
+$RegionKey = "EXACT_INTERNATIONAL_REGION_KEY_FROM_SCRIPT_1"
+
+$SecureToken = Read-Host "Enter your Cloudflare API token" -AsSecureString
+$Headers = @{
+    Authorization = "Bearer $([System.Net.NetworkCredential]::new('', $SecureToken).Password)"
+}
+
+$BaseUrl = "https://api.cloudflare.com/client/v4"
+
+try {
+    # Validate the requested region against the available regions.
+    $Regions = Invoke-RestMethod `
+        -Method Get `
+        -Uri "$BaseUrl/accounts/$AccountId/addressing/regional_hostnames/regions" `
+        -Headers $Headers
+
+    if (-not $Regions.success) {
+        throw ($Regions.errors | ConvertTo-Json -Depth 10)
+    }
+
+    $TargetRegion = $Regions.result |
+        Where-Object { $_.key -eq $RegionKey }
+
+    if (-not $TargetRegion) {
+        throw "The supplied region key was not found. No change was made."
+    }
+
+    # Read the existing configuration before changing anything.
+    $Uri = "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames/$Hostname"
+
+    $Current = Invoke-RestMethod `
+        -Method Get `
+        -Uri $Uri `
+        -Headers $Headers
+
+    if (-not $Current.success -or -not $Current.result.hostname) {
+        throw "An existing configuration could not be verified. No change was made."
+    }
+
+    if ($Current.result.region_key -eq $RegionKey) {
+        Write-Host "This hostname already uses the requested region. No change needed."
+        return
+    }
+
+    # Show the exact proposed change.
+    [PSCustomObject]@{
+        ZoneId         = $ZoneId
+        Hostname       = $Current.result.hostname
+        CurrentRegion  = $Current.result.region_key
+        ProposedRegion = $RegionKey
+        ProposedLabel  = $TargetRegion.label
+    } | Format-List
+
+    $Confirmation = Read-Host "To apply this change, type the hostname exactly"
+
+    if ($Confirmation -cne $Hostname) {
+        Write-Host "Cancelled. No change was made."
+        return
+    }
+
+    # This is the ONLY request that changes Cloudflare.
+    $Body = @{
+        region_key = $RegionKey
+    } | ConvertTo-Json
+
+    $Update = Invoke-RestMethod `
+        -Method Patch `
+        -Uri $Uri `
+        -Headers $Headers `
+        -ContentType "application/json" `
+        -Body $Body
+
+    if (-not $Update.success) {
+        throw ($Update.errors | ConvertTo-Json -Depth 10)
+    }
+
+    # Read back the saved configuration.
+    $Verified = Invoke-RestMethod `
+        -Method Get `
+        -Uri $Uri `
+        -Headers $Headers
+
+    if (
+        -not $Verified.success -or
+        $Verified.result.region_key -ne $RegionKey
+    ) {
+        throw "The update was submitted, but verification did not confirm the requested region."
+    }
+
+    Write-Host "`nUpdated and verified:" -ForegroundColor Green
+    $Verified.result | Format-List hostname, region_key
+}
+finally {
+    $Headers.Clear()
+    $SecureToken = $null
+}
