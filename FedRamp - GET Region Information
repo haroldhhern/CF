@@ -1,56 +1,36 @@
-# READ ONLY — makes no changes to Cloudflare.
-# Read available regions and current configurations
-
-$ErrorActionPreference = "Stop"
-
+$Token     = "YOUR_API_TOKEN"
 $AccountId = "YOUR_ACCOUNT_ID"
 $ZoneId    = "YOUR_ZONE_ID"
 
-$SecureToken = Read-Host "Enter your Cloudflare API token" -AsSecureString
-$Headers = @{
-    Authorization = "Bearer $([System.Net.NetworkCredential]::new('', $SecureToken).Password)"
-}
-
+$Headers = @{ Authorization = "Bearer $Token" }
 $BaseUrl = "https://api.cloudflare.com/client/v4"
 
-try {
-    # Read available regions.
-    $Regions = Invoke-RestMethod `
-        -Method Get `
-        -Uri "$BaseUrl/accounts/$AccountId/addressing/regional_hostnames/regions" `
-        -Headers $Headers
+$Regions = Invoke-RestMethod -Method Get -Headers $Headers `
+    -Uri "$BaseUrl/accounts/$AccountId/addressing/regional_hostnames/regions" `
+    -ErrorAction Stop
 
-    if (-not $Regions.success) {
-        throw ($Regions.errors | ConvertTo-Json -Depth 10)
-    }
+$Configured = Invoke-RestMethod -Method Get -Headers $Headers `
+    -Uri "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames" `
+    -ErrorAction Stop
 
-    Write-Host "`nAVAILABLE REGIONS" -ForegroundColor Cyan
-    $Regions.result |
-        Sort-Object label |
-        Format-Table key, label -AutoSize
-
-    # Read existing regional configurations in this zone.
-    $Configurations = Invoke-RestMethod `
-        -Method Get `
-        -Uri "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames" `
-        -Headers $Headers
-
-    if (-not $Configurations.success) {
-        throw ($Configurations.errors | ConvertTo-Json -Depth 10)
-    }
-
-    Write-Host "`nCURRENT REGIONAL HOSTNAME CONFIGURATIONS" -ForegroundColor Cyan
-
-    if (@($Configurations.result).Count -eq 0) {
-        Write-Host "No regional hostname configurations were returned."
-    }
-    else {
-        $Configurations.result |
-            Sort-Object hostname |
-            Format-Table hostname, region_key -AutoSize
-    }
+if (!$Regions.success -or !$Configured.success) {
+    throw "API request failed: $(
+        @($Regions.errors; $Configured.errors) | ConvertTo-Json -Depth 5
+    )"
 }
-finally {
-    $Headers.Clear()
-    $SecureToken = $null
-}
+
+Write-Host "`nAvailable FedRAMP regions:"
+$Regions.result |
+    Where-Object { $_.label -match "FedRAMP" } |
+    Format-Table key, label -AutoSize
+
+Write-Host "`nConfigured regional hostnames:"
+$Configured.result | ForEach-Object {
+    $Key = $_.region_key
+    [PSCustomObject]@{
+        Hostname  = $_.hostname
+        RegionKey = $Key
+        Region    = ($Regions.result |
+            Where-Object { $_.key -eq $Key }).label
+    }
+} | Format-Table -AutoSize
