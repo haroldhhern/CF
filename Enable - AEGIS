@@ -1,0 +1,43 @@
+
+###############################################################################
+#Verify that AEGIS is Enabled
+###############################################################################
+$ZoneId = "YOUR_ZONE_ID"
+$Token  = "YOUR_API_TOKEN"
+
+$Result = Invoke-RestMethod `
+    -Method Get `
+    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/settings/aegis" `
+    -Headers @{
+        Authorization = "Bearer $Token"
+    }
+
+$Result.result | ConvertTo-Json -Depth 10
+
+
+###############################################################################
+#Enable AEGIS
+###############################################################################
+
+$ZoneId = "YOUR_ZONE_ID"
+$PoolId = "YOUR_EGRESS_POOL_ID"
+$Token  = "YOUR_API_TOKEN"
+
+$Headers = @{
+    Authorization = "Bearer $Token"
+    "Content-Type" = "application/json"
+}
+
+$Body = @{
+    id = "aegis"
+    value = @{
+        enabled = $true
+        pool_id = $PoolId
+    }
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod `
+    -Method Patch `
+    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/settings/aegis" `
+    -Headers $Headers `
+    -Body $Body
