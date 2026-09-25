@@ -1,0 +1,109 @@
+#Set FedRamp Services
+1. Set your values and enter the token securely
+
+
+$AccountId = "YOUR_ACCOUNT_ID"
+$ZoneId    = "YOUR_ZONE_ID"
+$Hostname  = "app.one.domain.com"
+
+$SecureToken = Read-Host "Enter your Cloudflare API token" -AsSecureString
+$Token = [System.Net.NetworkCredential]::new("", $SecureToken).Password
+
+$Headers = @{
+    Authorization = "Bearer $Token"
+}
+
+$BaseUrl = "https://api.cloudflare.com/client/v4"
+
+
+
+2. List available regions
+
+
+$Regions = Invoke-RestMethod `
+    -Method Get `
+    -Uri "$BaseUrl/accounts/$AccountId/addressing/regional_hostnames/regions" `
+    -Headers $Headers
+
+$Regions.result | Format-Table key, label -AutoSize
+
+Find FedRAMP Moderate Compliant (International) and enter its exact key:
+
+$RegionKey = Read-Host "Enter the FedRAMP Moderate International region key"
+
+
+
+3. Check existing regional hostname configurations
+
+
+$Existing = Invoke-RestMethod `
+    -Method Get `
+    -Uri "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames" `
+    -Headers $Headers
+
+$Existing.result | Format-Table hostname, region_key -AutoSize
+
+
+
+4. Apply the configuration
+This script uses PATCH if the hostname already has a regional configuration, or POST if it does not.
+
+
+$RegionalHostname = $Existing.result |
+    Where-Object { $_.hostname -eq $Hostname }
+
+if ($RegionalHostname) {
+    # Update the existing regional configuration.
+    $Body = @{
+        region_key = $RegionKey
+    } | ConvertTo-Json
+
+    $Response = Invoke-RestMethod `
+        -Method Patch `
+        -Uri "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames/$Hostname" `
+        -Headers $Headers `
+        -ContentType "application/json" `
+        -Body $Body
+}
+else {
+    # Create a regional configuration for this hostname.
+    $Body = @{
+        hostname   = $Hostname
+        region_key = $RegionKey
+    } | ConvertTo-Json
+
+    $Response = Invoke-RestMethod `
+        -Method Post `
+        -Uri "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames" `
+        -Headers $Headers `
+        -ContentType "application/json" `
+        -Body $Body
+}
+
+$Response | ConvertTo-Json -Depth 10
+
+
+
+5. Verify the applied region
+
+
+$Verification = Invoke-RestMethod `
+    -Method Get `
+    -Uri "$BaseUrl/zones/$ZoneId/addressing/regional_hostnames/$Hostname" `
+    -Headers $Headers
+
+$Verification.result | Format-List hostname, region_key
+
+if (
+    $Verification.success -eq $true -and
+    $Verification.result.region_key -eq $RegionKey
+) {
+    Write-Host "Verified: $Hostname uses region '$RegionKey'." -ForegroundColor Green
+}
+else {
+    throw "Verification failed. Review the API response."
+}
+
+
+
+This applies to $Hostname only. For another hostname in the zone, change $Hostname and rerun steps 3–5.
