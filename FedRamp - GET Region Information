@@ -1,3 +1,25 @@
+#TEST TOKEN First
+$ZoneId = "YOUR_ZONE_ID"
+
+$SecureToken = Read-Host "Cloudflare API token" -AsSecureString
+$Token = [System.Net.NetworkCredential]::new("", $SecureToken).Password
+
+$Headers = @{
+    Authorization = "Bearer $($Token.Trim())"
+}
+
+$Response = Invoke-RestMethod -Method Get `
+    -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/addressing/regional_hostnames" `
+    -Headers $Headers `
+    -ErrorAction Stop
+
+$Response | ConvertTo-Json -Depth 10
+
+
+#####################################################################################################
+
+
+
 $Token     = "YOUR_API_TOKEN"
 $AccountId = "YOUR_ACCOUNT_ID"
 $ZoneId    = "YOUR_ZONE_ID"
