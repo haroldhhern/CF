@@ -16,6 +16,33 @@ $Result.result | ConvertTo-Json -Depth 10
 
 
 ###############################################################################
+#Check if not Authorized
+###############################################################################
+
+try {
+    $Response = Invoke-RestMethod `
+        -Method GET `
+        -Uri "https://api.cloudflare.com/client/v4/zones/$ZoneId/settings/aegis" `
+        -Headers $Headers
+
+    $Response | ConvertTo-Json -Depth 10
+}
+catch {
+    Write-Host "HTTP ERROR:" $_.Exception.Message
+
+    if ($_.Exception.Response) {
+        $reader = New-Object System.IO.StreamReader(
+            $_.Exception.Response.GetResponseStream()
+        )
+
+        $body = $reader.ReadToEnd()
+
+        Write-Host "`nCloudflare Response:"
+        Write-Host $body
+    }
+}
+
+###############################################################################
 #Enable AEGIS
 ###############################################################################
 
